@@ -11,3 +11,5 @@ The project environment is managed with [uv](https://docs.astral.sh/uv/) and liv
 ```bash
 uv sync
 ```
+
+Development conventions are in [CONTRIBUTING.md](CONTRIBUTING.md).
