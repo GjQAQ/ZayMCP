@@ -7,14 +7,17 @@ cannot find OpticStudio, set OPTICSTUDIO_DIRECTORY to the installation
 directory.
 """
 
+import collections.abc
 import ctypes
+import dataclasses
 import os
 import queue
 import threading
 import winreg
 
 # ZOS-API is a COM object and must be called from the thread that created it.
-_COINIT_APARTMENTTHREADED = 2
+#: COM apartment of the thread that owns the ZOS-API objects. 2 is an STA.
+COINIT_APARTMENTTHREADED: int = 2
 
 #: OpticStudio release this server supports.
 SUPPORTED_RELEASE: str = "2024 R2"
@@ -98,7 +101,7 @@ class OpticStudioSession:
         """
 
         # SystemFile is the path of the lens open in the OpticStudio window.
-        return self._call(lambda: str(self._system.SystemFile))
+        return self.call(lambda: str(self._system.SystemFile))
 
     def lens_file(self) -> dict[str, str | bool]:
         """
@@ -109,7 +112,7 @@ class OpticStudioSession:
         :raises OpticStudioError: The session is already closed, or OpticStudio cannot answer.
         """
 
-        return self._call(self._read_lens_file)
+        return self.call(self._read_lens_file)
 
     def version(self) -> dict[str, str | int]:
         """
@@ -120,9 +123,34 @@ class OpticStudioSession:
         :raises OpticStudioError: The session is already closed, or OpticStudio cannot answer.
         """
 
-        return self._call(self._read_version)
+        return self.call(self._read_version)
 
-    def _call(self, function):
+    def system_data(self, name: str) -> dict[str, object] | list[dict[str, object]]:
+        """
+        Return one System Explorer section for the lens open in the OpticStudio window.
+
+        :param str name: ``units``, ``aperture``, ``fields``, ``wavelengths``, ``environment``, ``polarization``, or ``ray_aiming``.
+        :returns: The section values. Wavelengths are a list. The other sections are dictionaries.
+        :rtype: dict[str, object] | list[dict[str, object]]
+        :raises KeyError: ``name`` is not a system section.
+        :raises OpticStudioError: The session is already closed, or OpticStudio cannot answer.
+        """
+
+        section = SYSTEM[name]
+
+        return self.call(lambda: section.read(self._system.SystemData))
+
+    def call(self, function):
+        """
+        Run a function on the ZOS-API thread and return its result.
+
+        An exception raised by ``function`` propagates to the caller.
+
+        :param function: Called on the session thread.
+        :returns: The value returned by ``function``.
+        :raises OpticStudioError: The session is already closed.
+        """
+
         # Hand function to the ZOS-API thread and wait for its result.
         if self._closed:
             raise OpticStudioError("The OpticStudio session is closed.")
@@ -176,10 +204,10 @@ class OpticStudioSession:
         import clr
 
         # NetHelper locates the OpticStudio installation. It ships in the Zemax data folder.
-        clr.AddReference(_net_helper_path())
+        clr.AddReference(net_helper_path())
 
-        directory = _locate_opticstudio(self.directory)
-        _require_supported_release(directory)
+        directory = locate_opticstudio(self.directory)
+        require_supported_release(directory)
         self.installation_directory = directory
 
         # These two assemblies are the ZOS-API itself, loaded from that installation.
@@ -224,10 +252,10 @@ class OpticStudioSession:
         application = self._application
 
         return {
-            "product_name": _text(info.ProductName),
-            "product_version": _text(info.ProductVersion),
-            "file_version": _text(info.FileVersion),
-            "file_description": _text(info.FileDescription),
+            "product_name": text(info.ProductName),
+            "product_version": text(info.ProductVersion),
+            "file_version": text(info.FileVersion),
+            "file_description": text(info.FileDescription),
             "opticstudio_version": int(application.OpticStudioVersion),
             "zos_major_version": int(application.ZOSMajorVersion),
             "zos_minor_version": int(application.ZOSMinorVersion),
@@ -244,11 +272,11 @@ class OpticStudioSession:
         title_notes = system.SystemData.TitleNotes
 
         return {
-            "file": _text(system.SystemFile),
-            "name": _text(system.SystemName),
-            "title": _text(title_notes.Title),
-            "author": _text(title_notes.Author),
-            "notes": _text(title_notes.Notes),
+            "file": text(system.SystemFile),
+            "name": text(system.SystemName),
+            "title": text(title_notes.Title),
+            "author": text(title_notes.Author),
+            "notes": text(title_notes.Notes),
             "mode": str(system.Mode),
             "needs_save": bool(system.NeedsSave),
             "is_project_directory": bool(system.IsProjectDirectory),
@@ -264,11 +292,299 @@ class OpticStudioSession:
             application.CloseApplication()
 
 
-def _text(value: object) -> str:
+def text(value: object) -> str:
+    """
+    Return a ZOS-API string, using an empty string when the value is missing.
+
+    :param object value: Value returned by ZOS-API. ``None`` is missing.
+    :returns: The text, or an empty string when ``value`` is ``None``.
+    :rtype: str
+    """
+
     if value is None:
         return ""
 
     return str(value)
+
+
+@dataclasses.dataclass(frozen=True)
+class Attribute:
+    """
+    One ZOS-API member copied into a result field.
+
+    :param str name: Key in the result.
+    :param source: Property name, or a path of property names. The last member is called when ``call`` is true.
+    :type source: str | tuple[str, ...]
+    :param convert: Converts the raw value.
+    :type convert: collections.abc.Callable[[object], object]
+    :param bool call: When true, call the last member before converting it.
+    """
+
+    #: Key in the result.
+    name: str
+    #: Property name, or a path of property names.
+    source: str | tuple[str, ...]
+    #: Converts the raw value.
+    convert: collections.abc.Callable[[object], object]
+    #: When true, call the last member before converting it.
+    call: bool = False
+
+    def read(self, data) -> object:
+        """
+        Read this member from a ZOS-API object.
+
+        :param data: Object that exposes ``source``.
+        :returns: The converted value.
+        :rtype: object
+        """
+
+        # Walk a property path, then optionally call the last member.
+        path = self.source if isinstance(self.source, tuple) else (self.source,)
+        raw = data
+
+        for name in path:
+            raw = getattr(raw, name)
+
+        if self.call:
+            raw = raw()
+
+        return self.convert(raw)
+
+    @classmethod
+    def record(cls, data, attributes: tuple['Attribute', ...]) -> dict[str, object]:
+        """
+        Copy attributes of one object into a dictionary.
+
+        :param data: Object that exposes each attribute.
+        :param tuple[Attribute, ...] attributes: Attributes to copy.
+        :returns: Values keyed by attribute name.
+        :rtype: dict[str, object]
+        """
+
+        return {item.name: item.read(data) for item in attributes}
+
+
+@dataclasses.dataclass(frozen=True)
+class Rows:
+    """
+    A 1-based ZOS-API list copied into a list of dictionaries.
+
+    :param str count: Property that holds the number of rows.
+    :param str item: Method that returns one row. The argument is a 1-based index.
+    :param attributes: Attributes copied from each row.
+    :type attributes: tuple[Attribute, ...]
+    """
+
+    #: Property that holds the number of rows.
+    count: str
+    #: Method that returns one row. The argument is a 1-based index.
+    item: str
+    #: Attributes copied from each row.
+    attributes: tuple[Attribute, ...]
+
+    def read(self, data) -> list[dict[str, object]]:
+        """
+        Read every row.
+
+        :param data: Object that exposes ``count`` and ``item``.
+        :returns: One dictionary per row.
+        :rtype: list[dict[str, object]]
+        """
+
+        # ZOS-API collections are 1-based.
+        getter = getattr(data, self.item)
+        total = int(getattr(data, self.count))
+        rows = []
+
+        for index in range(1, total + 1):
+            rows.append(Attribute.record(getter(index), self.attributes))
+
+        return rows
+
+
+@dataclasses.dataclass(frozen=True)
+class Section:
+    """
+    One SystemData child copied into a dictionary.
+
+    :param str source: Property name on SystemData.
+    :param attributes: Members read from that child.
+    :type attributes: tuple[Attribute, ...]
+    :param rows: Named collections read from that child.
+    :type rows: tuple[tuple[str, Rows], ...]
+    """
+
+    #: Property name on SystemData.
+    source: str
+    #: Members read from that child.
+    attributes: tuple[Attribute, ...] = ()
+    #: Named collections read from that child. Each entry is a result key and the rows to read.
+    rows: tuple[tuple[str, Rows], ...] = ()
+
+    def read(self, system_data) -> dict[str, object]:
+        """
+        Read this section from system data.
+
+        :param system_data: The ZOS-API ``SystemData`` object.
+        :returns: Members and named collections.
+        :rtype: dict[str, object]
+        """
+
+        data = getattr(system_data, self.source)
+        result = Attribute.record(data, self.attributes)
+
+        for name, rows in self.rows:
+            result[name] = rows.read(data)
+
+        return result
+
+
+@dataclasses.dataclass(frozen=True)
+class Listing:
+    """
+    One SystemData child copied into a list of dictionaries.
+
+    :param str source: Property name on SystemData.
+    :param Rows rows: The 1-based collection on that child.
+    """
+
+    #: Property name on SystemData.
+    source: str
+    #: The 1-based collection on that child.
+    rows: Rows
+
+    def read(self, system_data) -> list[dict[str, object]]:
+        """
+        Read this listing from system data.
+
+        :param system_data: The ZOS-API ``SystemData`` object.
+        :returns: One dictionary per row.
+        :rtype: list[dict[str, object]]
+        """
+
+        return self.rows.read(getattr(system_data, self.source))
+
+
+#: System Explorer sections, keyed by the name passed to OpticStudioSession.system_data.
+SYSTEM: dict[str, Section | Listing] = {
+    'units': Section(
+        'Units',
+        (
+            Attribute('lens_units', 'LensUnits', str),
+            Attribute('source_unit_prefix', 'SourceUnitPrefix', str),
+            Attribute('source_units', 'SourceUnits', str),
+            Attribute('analysis_unit_prefix', 'AnalysisUnitPrefix', str),
+            Attribute('analysis_units', 'AnalysisUnits', str),
+            Attribute('afocal_mode_units', 'AfocalModeUnits', str),
+            Attribute('mtf_units', 'MTFUnits', str),
+        ),
+    ),
+    'aperture': Section(
+        'Aperture',
+        (
+            Attribute('aperture_type', 'ApertureType', str),
+            Attribute('aperture_value', 'ApertureValue', float),
+            Attribute('apodization_type', 'ApodizationType', str),
+            Attribute('apodization_factor', 'ApodizationFactor', float),
+            Attribute('apodization_factor_is_used', 'ApodizationFactorIsUsed', bool),
+            Attribute('semi_diameter_margin', 'SemiDiameterMargin', float),
+            Attribute('semi_diameter_margin_percent', 'SemiDiameterMarginPct', float),
+            Attribute('global_coordinate_reference_surface', ('GCRS', 'GetSelectedSurface'), int, call=True),
+            Attribute('telecentric_object_space', 'TelecentricObjectSpace', bool),
+            Attribute('afocal_image_space', 'AFocalImageSpace', bool),
+            Attribute('iterate_solves_when_updating', 'IterateSolvesWhenUpdating', bool),
+            Attribute('fast_semi_diameters', 'FastSemiDiameters', bool),
+            Attribute('check_grin_apertures', 'CheckGRINApertures', bool),
+        ),
+    ),
+    'fields': Section(
+        'Fields',
+        (
+            Attribute('type', 'GetFieldType', str, call=True),
+            Attribute('normalization', 'Normalization', str),
+        ),
+        (
+            (
+                'points',
+                Rows(
+                    'NumberOfFields',
+                    'GetField',
+                    (
+                        Attribute('number', 'FieldNumber', int),
+                        Attribute('active', 'IsActive', bool),
+                        Attribute('x', 'X', float),
+                        Attribute('y', 'Y', float),
+                        Attribute('weight', 'Weight', float),
+                        Attribute('vdx', 'VDX', float),
+                        Attribute('vdy', 'VDY', float),
+                        Attribute('vcx', 'VCX', float),
+                        Attribute('vcy', 'VCY', float),
+                        Attribute('van', 'VAN', float),
+                        Attribute('tan', 'TAN', float),
+                        Attribute('comment', 'Comment', text),
+                        Attribute('x_solve', 'XSolve', str),
+                        Attribute('y_solve', 'YSolve', str),
+                        Attribute('ignore', 'Ignore', bool),
+                    ),
+                ),
+            ),
+        ),
+    ),
+    'wavelengths': Listing(
+        'Wavelengths',
+        Rows(
+            'NumberOfWavelengths',
+            'GetWavelength',
+            (
+                Attribute('number', 'WavelengthNumber', int),
+                Attribute('active', 'IsActive', bool),
+                Attribute('wavelength', 'Wavelength', float),
+                Attribute('weight', 'Weight', float),
+                Attribute('primary', 'IsPrimary', bool),
+            ),
+        ),
+    ),
+    'environment': Section(
+        'Environment',
+        (
+            Attribute('temperature', 'Temperature', float),
+            Attribute('pressure', 'Pressure', float),
+            Attribute('adjust_index_to_environment', 'AdjustIndexToEnvironment', bool),
+        ),
+    ),
+    'polarization': Section(
+        'Polarization',
+        (
+            Attribute('method', 'Method', str),
+            Attribute('unpolarized', 'Unpolarized', bool),
+            Attribute('jx', 'Jx', float),
+            Attribute('jy', 'Jy', float),
+            Attribute('x_phase', 'XPhase', float),
+            Attribute('y_phase', 'YPhase', float),
+            Attribute('convert_thin_film_phase_to_ray_equivalent', 'ConvertThinFilmPhaseToRayEquivalent', bool),
+        ),
+    ),
+    'ray_aiming': Section(
+        'RayAiming',
+        (
+            Attribute('setting', 'RayAiming', str),
+            Attribute('method', 'Method', str),
+            Attribute('use_ray_aiming_cache', 'UseRayAimingCache', bool),
+            Attribute('use_robust_ray_aiming', 'UseRobustRayAiming', bool),
+            Attribute('scale_pupil_shift_factors_by_field', 'ScalePupilShiftFactorsByField', bool),
+            Attribute('automatically_calculate_pupil_shifts', 'AutomaticallyCalculatePupilShiftsIsChecked', bool),
+            Attribute('use_enhanced_ray_aiming', 'UseEnhancedRayAiming', bool),
+            Attribute('use_advanced_convergence', 'UseAdvancedConvergence', bool),
+            Attribute('use_fallback_search_during_cache_setup', 'UseFallBackSearchDuringCacheSetup', bool),
+            Attribute('pupil_shift_x', 'PupilShiftX', float),
+            Attribute('pupil_shift_y', 'PupilShiftY', float),
+            Attribute('pupil_shift_z', 'PupilShiftZ', float),
+            Attribute('pupil_compress_x', 'PupilCompressX', float),
+            Attribute('pupil_compress_y', 'PupilCompressY', float),
+            Attribute('cache_setup_steps', 'NumStepsCacheSetup', int),
+        ),
+    ),
+}
 
 
 def _initialize_sta():
@@ -276,13 +592,24 @@ def _initialize_sta():
     ole32 = ctypes.windll.ole32
     ole32.CoInitializeEx.argtypes = [ctypes.c_void_p, ctypes.c_uint]
     ole32.CoInitializeEx.restype = ctypes.c_long
-    result = ole32.CoInitializeEx(None, _COINIT_APARTMENTTHREADED)
+    result = ole32.CoInitializeEx(None, COINIT_APARTMENTTHREADED)
 
     if result < 0:
         raise OpticStudioError("The ZOS-API thread could not join an STA.")
 
 
-def _locate_opticstudio(directory):
+def locate_opticstudio(directory: str | None) -> str:
+    """
+    Return the OpticStudio installation directory.
+
+    Zemax's helper is asked first. When ``directory`` is omitted and that cannot find OpticStudio, ``OPTICSTUDIO_DIRECTORY`` is used.
+
+    :param str | None directory: Installation directory. ``None`` asks Zemax's helper, then the environment variable.
+    :returns: The installation directory.
+    :rtype: str
+    :raises OpticStudioError: OpticStudio cannot be located.
+    """
+
     import ZOSAPI_NetHelper
 
     # Initialize() asks NetHelper where OpticStudio is installed.
@@ -305,7 +632,14 @@ def _locate_opticstudio(directory):
     return str(initializer.GetZemaxDirectory())
 
 
-def _require_supported_release(directory):
+def require_supported_release(directory: str) -> None:
+    """
+    Reject an OpticStudio installation that is not the supported release.
+
+    :param str directory: Installation directory that contains ``OpticStudio.exe``.
+    :raises OpticStudioError: The product version is not 2024 R2.
+    """
+
     import System.Diagnostics
 
     executable = os.path.join(directory, "OpticStudio.exe")
@@ -318,7 +652,15 @@ def _require_supported_release(directory):
         )
 
 
-def _net_helper_path():
+def net_helper_path() -> str:
+    """
+    Return the path of ``ZOSAPI_NetHelper.dll`` in the Zemax data folder.
+
+    :returns: The helper assembly path.
+    :rtype: str
+    :raises OSError: The Zemax registry key or ``ZemaxRoot`` value is missing.
+    """
+
     # ZemaxRoot is the data folder OpticStudio created, not the program directory.
     key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\Zemax")
 

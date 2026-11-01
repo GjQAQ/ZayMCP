@@ -12,6 +12,6 @@ Use the uv environment in `.venv`. Keep the server able to find OpticStudio on a
 
 Write [Sphinx-style](https://www.sphinx-doc.org/en/master/usage/restructuredtext/domains.html#info-field-lists) docstrings for public classes, functions, and methods. Document public fields and module-level variables with a `#:` comment and a Python type hint. Document `__init__` parameters on the class. Dunder methods do not get docstrings.
 
-Prefer public attributes. Use a non-public attribute only when other code must not touch it. For example, the ZOS-API application object stays non-public because it can be used only on the thread that created it.
+Prefer public attributes, classes, functions, and methods. Use a non-public name only when other code must not touch it. For example, the ZOS-API application object and the methods that use it stay non-public, because they can be used only on the thread that created the application.
 
 Write commit messages with [Conventional Commits](https://www.conventionalcommits.org/).

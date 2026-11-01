@@ -55,7 +55,14 @@ class OpticStudioConnection:
 
 
 @contextlib.asynccontextmanager
-async def _lifespan(server: mcp.server.MCPServer):
+async def lifespan(server: mcp.server.MCPServer):
+    """
+    Keep one OpticStudio connection for the life of this server process.
+
+    :param mcp.server.MCPServer server: The server being started.
+    :returns: The connection yielded to each request.
+    """
+
     # Close the OpticStudio connection when the host stops this process.
     connection = OpticStudioConnection()
 
@@ -75,14 +82,25 @@ def create_server() -> mcp.server.MCPServer:
     :rtype: mcp.server.MCPServer
     """
 
-    server = mcp.server.MCPServer(SERVER_NAME, lifespan=_lifespan)
+    server = mcp.server.MCPServer(SERVER_NAME, lifespan=lifespan)
 
-    def _read(ctx, read):
+    def read(ctx, load):
+        """
+        Run one read against the shared session.
+
+        The session is dropped when OpticStudio cannot answer, so the next call can reconnect.
+
+        :param ctx: Tool context for this request.
+        :param load: Called with the open session.
+        :returns: The value returned by ``load``.
+        :raises mcp.server.mcpserver.exceptions.ToolError: OpticStudio cannot answer.
+        """
+
         # Drop the shared session when OpticStudio cannot answer, so the next call can reconnect.
         connection = ctx.request_context.lifespan_context
 
         try:
-            return read(connection.open())
+            return load(connection.open())
         except zemaxmcp.opticstudio.OpticStudioError as exc:
             connection.close()
             raise mcp.server.mcpserver.exceptions.ToolError(str(exc)) from exc
@@ -106,7 +124,7 @@ def create_server() -> mcp.server.MCPServer:
         - supported_release: Release this server supports. This value is fixed by the server.
         """
 
-        return _read(ctx, lambda session: session.version())
+        return read(ctx, lambda session: session.version())
 
     @server.tool()
     def get_lens_metadata(ctx: mcp.server.mcpserver.Context) -> dict[str, str | bool]:
@@ -123,7 +141,140 @@ def create_server() -> mcp.server.MCPServer:
         - is_project_directory: True when the lens is stored as a project directory rather than a single file.
         """
 
-        return _read(ctx, lambda session: session.lens_file())
+        return read(ctx, lambda session: session.lens_file())
+
+    @server.tool()
+    def get_system_units(ctx: mcp.server.mcpserver.Context) -> dict[str, str]:
+        """
+        Return the System Explorer units for the lens open in the OpticStudio window.
+
+        - lens_units: Millimeters, Centimeters, Inches, or Meters.
+        - source_unit_prefix: Prefix applied to source units, such as None or Milli.
+        - source_units: Watts, Lumens, or Joules.
+        - analysis_unit_prefix: Prefix applied to analysis units.
+        - analysis_units: Irradiance unit, such as WattsPerMMSq.
+        - afocal_mode_units: Angular unit used when afocal image space is enabled, such as Milliradians or Degrees.
+        - mtf_units: CyclesPerMillimeter or CyclesPerMilliradian.
+        """
+
+        return read(ctx, lambda session: session.system_data('units'))
+
+    @server.tool()
+    def get_system_aperture(ctx: mcp.server.mcpserver.Context) -> dict[str, str | float | bool | int]:
+        """
+        Return the System Explorer aperture for the lens open in the OpticStudio window.
+
+        - aperture_type: EntrancePupilDiameter, ImageSpaceFNum, ObjectSpaceNA, FloatByStopSize, ParaxialWorkingFNum, or ObjectConeAngle.
+        - aperture_value: EntrancePupilDiameter is a diameter in lens units. ImageSpaceFNum and ParaxialWorkingFNum are dimensionless. ObjectSpaceNA is dimensionless. ObjectConeAngle is in degrees. FloatByStopSize takes the aperture from the stop surface semi-diameter.
+        - apodization_type: Uniform, Gaussian, or CosineCubed.
+        - apodization_factor: Apodization factor. Meaningful when apodization_factor_is_used is true.
+        - apodization_factor_is_used: True when the apodization factor is used.
+        - semi_diameter_margin: Length added to computed semi-diameters, in lens units.
+        - semi_diameter_margin_percent: Percent added to computed semi-diameters.
+        - global_coordinate_reference_surface: Surface number used as the global coordinate reference. 0 is the object surface.
+        - telecentric_object_space: True when object-space telecentricity is enabled.
+        - afocal_image_space: True when afocal image space is enabled.
+        - iterate_solves_when_updating: True when solves are iterated while the system updates.
+        - fast_semi_diameters: True when fast semi-diameter computation is enabled.
+        - check_grin_apertures: True when GRIN apertures are checked.
+        """
+
+        return read(ctx, lambda session: session.system_data('aperture'))
+
+    @server.tool()
+    def get_system_fields(ctx: mcp.server.mcpserver.Context) -> dict[str, object]:
+        """
+        Return the System Explorer fields for the lens open in the OpticStudio window.
+
+        - type: Angle, ObjectHeight, ParaxialImageHeight, RealImageHeight, or TheodoliteAngle.
+        - normalization: Radial or Rectangular.
+        - points: One entry per field. x and y are degrees for Angle and TheodoliteAngle, and lens units for the height types.
+        - points[].number: 1-based field number.
+        - points[].active: True when the field is active.
+        - points[].x: X field coordinate.
+        - points[].y: Y field coordinate.
+        - points[].weight: Relative field weight.
+        - points[].vdx: Vignetting decenter in X, as a fraction of the pupil.
+        - points[].vdy: Vignetting decenter in Y, as a fraction of the pupil.
+        - points[].vcx: Vignetting compression in X, as a fraction of the pupil.
+        - points[].vcy: Vignetting compression in Y, as a fraction of the pupil.
+        - points[].van: Vignetting angle, in degrees.
+        - points[].tan: Tangential angle, in degrees.
+        - points[].comment: Field comment. Empty when the field has no comment.
+        - points[].x_solve: Solve type for X, such as Fixed.
+        - points[].y_solve: Solve type for Y, such as Fixed.
+        - points[].ignore: True when the field is ignored.
+        """
+
+        return read(ctx, lambda session: session.system_data('fields'))
+
+    @server.tool()
+    def get_system_wavelengths(ctx: mcp.server.mcpserver.Context) -> list[dict[str, int | bool | float]]:
+        """
+        Return the System Explorer wavelengths for the lens open in the OpticStudio window.
+
+        Each entry is one wavelength, in micrometers.
+
+        - number: 1-based wavelength number.
+        - active: True when the wavelength is active.
+        - wavelength: Wavelength in micrometers.
+        - weight: Relative wavelength weight.
+        - primary: True for the primary wavelength.
+        """
+
+        return read(ctx, lambda session: session.system_data('wavelengths'))
+
+    @server.tool()
+    def get_system_environment(ctx: mcp.server.mcpserver.Context) -> dict[str, float | bool]:
+        """
+        Return the System Explorer environment for the lens open in the OpticStudio window.
+
+        - temperature: Temperature in degrees Celsius.
+        - pressure: Pressure in atmospheres.
+        - adjust_index_to_environment: True when refractive indices are adjusted to the system temperature and pressure.
+        """
+
+        return read(ctx, lambda session: session.system_data('environment'))
+
+    @server.tool()
+    def get_system_polarization(ctx: mcp.server.mcpserver.Context) -> dict[str, str | bool | float]:
+        """
+        Return the System Explorer polarization for the lens open in the OpticStudio window.
+
+        - method: XAxisMethod, YAxisMethod, or ZAxisMethod.
+        - unpolarized: True when the input beam is unpolarized.
+        - jx: Jones vector X component.
+        - jy: Jones vector Y component.
+        - x_phase: X phase, in degrees.
+        - y_phase: Y phase, in degrees.
+        - convert_thin_film_phase_to_ray_equivalent: True when thin-film phase is converted to a ray-equivalent angle.
+        """
+
+        return read(ctx, lambda session: session.system_data('polarization'))
+
+    @server.tool()
+    def get_system_ray_aiming(ctx: mcp.server.mcpserver.Context) -> dict[str, str | bool | float | int]:
+        """
+        Return the System Explorer ray aiming for the lens open in the OpticStudio window.
+
+        - setting: Off, Paraxial, or Real.
+        - method: Heuristic or Optimize. Used when setting is Real.
+        - use_ray_aiming_cache: True when the ray-aiming cache is used.
+        - use_robust_ray_aiming: True when robust ray aiming is used.
+        - scale_pupil_shift_factors_by_field: True when pupil-shift factors are scaled by field.
+        - automatically_calculate_pupil_shifts: True when pupil shifts are calculated automatically.
+        - use_enhanced_ray_aiming: True when enhanced ray aiming is used.
+        - use_advanced_convergence: True when advanced convergence is used.
+        - use_fallback_search_during_cache_setup: True when cache setup falls back to a search.
+        - pupil_shift_x: Pupil shift factor in X.
+        - pupil_shift_y: Pupil shift factor in Y.
+        - pupil_shift_z: Pupil shift factor in Z.
+        - pupil_compress_x: Pupil compression factor in X.
+        - pupil_compress_y: Pupil compression factor in Y.
+        - cache_setup_steps: Number of steps used to build the ray-aiming cache.
+        """
+
+        return read(ctx, lambda session: session.system_data('ray_aiming'))
 
     return server
 
