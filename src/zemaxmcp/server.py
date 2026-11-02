@@ -3,6 +3,7 @@ Stdio MCP server.
 """
 
 import contextlib
+import typing
 
 import mcp.server
 import mcp.server.mcpserver
@@ -152,13 +153,28 @@ def create_server() -> mcp.server.MCPServer:
         return read(ctx, lambda session: session.lens_file())
 
     @server.tool(
-        description='Return the unit settings in System Explorer.',
+        description='Return one group of settings from System Explorer.',
     )
-    def get_system_units(ctx: mcp.server.mcpserver.Context) -> dict[str, str]:
+    def get_system_settings(
+        ctx: mcp.server.mcpserver.Context,
+        section: typing.Literal[
+            'units',
+            'aperture',
+            'fields',
+            'wavelengths',
+            'environment',
+            'polarization',
+            'ray_aiming',
+        ],
+    ) -> dict[str, object] | list[dict[str, object]]:
         """
-        Return the System Explorer units for the lens open in the OpticStudio window.
+        Return one group of System Explorer settings.
 
-        :returns:
+        :param section: ``units``, ``aperture``, ``fields``, ``wavelengths``, ``environment``, ``polarization``, or ``ray_aiming``.
+        :returns: The selected group. ``wavelengths`` is a list of wavelengths in micrometers. The other groups are dictionaries.
+
+            **units**
+
             * **lens_units** -- Millimeters, Centimeters, Inches, or Meters.
             * **source_unit_prefix** -- Prefix applied to source units, such as ``None`` or ``Milli``.
             * **source_units** -- Watts, Lumens, or Joules.
@@ -166,24 +182,14 @@ def create_server() -> mcp.server.MCPServer:
             * **analysis_units** -- Irradiance unit, such as ``WattsPerMMSq``.
             * **afocal_mode_units** -- Angular unit used when afocal image space is enabled, such as ``Milliradians`` or ``Degrees``.
             * **mtf_units** -- ``CyclesPerMillimeter`` or ``CyclesPerMilliradian``.
-        :rtype: dict[str, str]
-        """
 
-        return read(ctx, lambda session: session.system_data('units'))
+            **aperture**
 
-    @server.tool(
-        description='Return the aperture settings in System Explorer.',
-    )
-    def get_system_aperture(ctx: mcp.server.mcpserver.Context) -> dict[str, str | float | bool | int]:
-        """
-        Return the System Explorer aperture for the lens open in the OpticStudio window.
-
-        :returns:
             * **aperture_type** -- ``EntrancePupilDiameter``, ``ImageSpaceFNum``, ``ObjectSpaceNA``, ``FloatByStopSize``, ``ParaxialWorkingFNum``, or ``ObjectConeAngle``.
             * **aperture_value** -- ``EntrancePupilDiameter`` is a diameter in lens units. ``ImageSpaceFNum`` and ``ParaxialWorkingFNum`` are dimensionless. ``ObjectSpaceNA`` is dimensionless. ``ObjectConeAngle`` is in degrees. ``FloatByStopSize`` takes the aperture from the stop surface semi-diameter.
             * **apodization_type** -- ``Uniform``, ``Gaussian``, or ``CosineCubed``.
             * **apodization_factor** -- Apodization factor. Meaningful when ``apodization_factor_is_used`` is true.
-            * **apodization_factor_is_used** -- True when the apodization factor is used.
+            * **apodization_factor_is_used** -- True when the apodization factor is used. This member is read-only.
             * **semi_diameter_margin** -- Length added to computed semi-diameters, in lens units.
             * **semi_diameter_margin_percent** -- Percent added to computed semi-diameters.
             * **global_coordinate_reference_surface** -- Surface number used as the global coordinate reference. 0 is the object surface.
@@ -192,19 +198,9 @@ def create_server() -> mcp.server.MCPServer:
             * **iterate_solves_when_updating** -- True when solves are iterated while the system updates.
             * **fast_semi_diameters** -- True when fast semi-diameter computation is enabled.
             * **check_grin_apertures** -- True when GRIN apertures are checked.
-        :rtype: dict[str, str | float | bool | int]
-        """
 
-        return read(ctx, lambda session: session.system_data('aperture'))
+            **fields**
 
-    @server.tool(
-        description='Return the field settings in System Explorer.',
-    )
-    def get_system_fields(ctx: mcp.server.mcpserver.Context) -> dict[str, object]:
-        """
-        Return the System Explorer fields for the lens open in the OpticStudio window.
-
-        :returns:
             * **type** -- ``Angle``, ``ObjectHeight``, ``ParaxialImageHeight``, ``RealImageHeight``, or ``TheodoliteAngle``.
             * **normalization** -- ``Radial`` or ``Rectangular``.
             * **points** -- One entry per field. ``x`` and ``y`` are degrees for ``Angle`` and ``TheodoliteAngle``, and lens units for the height types.
@@ -223,55 +219,23 @@ def create_server() -> mcp.server.MCPServer:
             * **points[].x_solve** -- Solve type for X, such as ``Fixed``.
             * **points[].y_solve** -- Solve type for Y, such as ``Fixed``.
             * **points[].ignore** -- True when the field is ignored.
-        :rtype: dict[str, object]
-        """
 
-        return read(ctx, lambda session: session.system_data('fields'))
-
-    @server.tool(
-        description='Return the wavelength settings in System Explorer.',
-    )
-    def get_system_wavelengths(ctx: mcp.server.mcpserver.Context) -> list[dict[str, int | bool | float]]:
-        """
-        Return the System Explorer wavelengths for the lens open in the OpticStudio window.
-
-        :returns:
-            One entry per wavelength. ``wavelength`` is in micrometers.
+            **wavelengths**
 
             * **number** -- 1-based wavelength number.
             * **active** -- True when the wavelength is active.
             * **wavelength** -- Wavelength in micrometers.
             * **weight** -- Relative wavelength weight.
             * **primary** -- True for the primary wavelength.
-        :rtype: list[dict[str, int | bool | float]]
-        """
 
-        return read(ctx, lambda session: session.system_data('wavelengths'))
+            **environment**
 
-    @server.tool(
-        description='Return the environment settings in System Explorer.',
-    )
-    def get_system_environment(ctx: mcp.server.mcpserver.Context) -> dict[str, float | bool]:
-        """
-        Return the System Explorer environment for the lens open in the OpticStudio window.
-
-        :returns:
             * **temperature** -- Temperature in degrees Celsius.
             * **pressure** -- Pressure in atmospheres.
             * **adjust_index_to_environment** -- True when refractive indices are adjusted to the system temperature and pressure.
-        :rtype: dict[str, float | bool]
-        """
 
-        return read(ctx, lambda session: session.system_data('environment'))
+            **polarization**
 
-    @server.tool(
-        description='Return the polarization settings in System Explorer.',
-    )
-    def get_system_polarization(ctx: mcp.server.mcpserver.Context) -> dict[str, str | bool | float]:
-        """
-        Return the System Explorer polarization for the lens open in the OpticStudio window.
-
-        :returns:
             * **method** -- ``XAxisMethod``, ``YAxisMethod``, or ``ZAxisMethod``.
             * **unpolarized** -- True when the input beam is unpolarized.
             * **jx** -- Jones vector X component.
@@ -279,19 +243,9 @@ def create_server() -> mcp.server.MCPServer:
             * **x_phase** -- X phase, in degrees.
             * **y_phase** -- Y phase, in degrees.
             * **convert_thin_film_phase_to_ray_equivalent** -- True when thin-film phase is converted to a ray-equivalent angle.
-        :rtype: dict[str, str | bool | float]
-        """
 
-        return read(ctx, lambda session: session.system_data('polarization'))
+            **ray_aiming**
 
-    @server.tool(
-        description='Return the ray aiming settings in System Explorer.',
-    )
-    def get_system_ray_aiming(ctx: mcp.server.mcpserver.Context) -> dict[str, str | bool | float | int]:
-        """
-        Return the System Explorer ray aiming for the lens open in the OpticStudio window.
-
-        :returns:
             * **setting** -- ``Off``, ``Paraxial``, or ``Real``.
             * **method** -- ``Heuristic`` or ``Optimize``. Used when ``setting`` is ``Real``.
             * **use_ray_aiming_cache** -- True when the ray-aiming cache is used.
@@ -307,10 +261,43 @@ def create_server() -> mcp.server.MCPServer:
             * **pupil_compress_x** -- Pupil compression factor in X.
             * **pupil_compress_y** -- Pupil compression factor in Y.
             * **cache_setup_steps** -- Number of steps used to build the ray-aiming cache.
-        :rtype: dict[str, str | bool | float | int]
+        :rtype: dict[str, object] | list[dict[str, object]]
+        :raises ValueError: ``section`` is not a setting group.
         """
 
-        return read(ctx, lambda session: session.system_data('ray_aiming'))
+        return read(ctx, lambda session: session.system_data(section))
+
+    @server.tool(
+        description=(
+            'Change one group of settings in System Explorer. '
+            'Only keys in `values` are written. '
+            'Field points and wavelengths are lists of rows and cannot be changed with this tool.'
+        ),
+    )
+    def set_system_settings(
+        ctx: mcp.server.mcpserver.Context,
+        section: typing.Literal[
+            'units',
+            'aperture',
+            'fields',
+            'wavelengths',
+            'environment',
+            'polarization',
+            'ray_aiming',
+        ],
+        values: dict[str, str | float | bool | int],
+    ) -> dict[str, object] | list[dict[str, object]]:
+        """
+        Change keys in one System Explorer setting group and return the group.
+
+        :param section: ``units``, ``aperture``, ``fields``, ``wavelengths``, ``environment``, ``polarization``, or ``ray_aiming``.
+        :param values: Keys to change. Names and units match the object returned by :meth:`get_system_settings` for ``section``. ``apodization_factor_is_used`` is read-only. ``points`` and ``wavelengths`` are lists of rows.
+        :returns: The setting group after the change.
+        :rtype: dict[str, object] | list[dict[str, object]]
+        :raises ValueError: ``section`` is unknown, ``values`` is empty, or a key cannot be changed.
+        """
+
+        return read(ctx, lambda session: session.set_system_data(section, values))
 
     return server
 

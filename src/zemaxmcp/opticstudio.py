@@ -130,15 +130,41 @@ class OpticStudioSession:
         Return one System Explorer section for the lens open in the OpticStudio window.
 
         :param str name: ``units``, ``aperture``, ``fields``, ``wavelengths``, ``environment``, ``polarization``, or ``ray_aiming``.
-        :returns: The section values. Wavelengths are a list. The other sections are dictionaries.
+        :returns: The group values. Wavelengths are a list. The other groups are dictionaries.
         :rtype: dict[str, object] | list[dict[str, object]]
-        :raises KeyError: ``name`` is not a system section.
+        :raises ValueError: ``name`` is not a setting group.
         :raises OpticStudioError: The session is already closed, or OpticStudio cannot answer.
         """
 
-        section = SYSTEM[name]
+        section = setting_group(name)
 
         return self.call(lambda: section.read(self._system.SystemData))
+
+    def set_system_data(self, name: str, values: dict[str, object]) -> dict[str, object] | list[dict[str, object]]:
+        """
+        Change keys in one System Explorer setting group and return the group.
+
+        Only keys in ``values`` are written. Field points and the wavelength list are rows and stay unchanged.
+
+        :param str name: Setting group. The same names as :meth:`system_data`.
+        :param dict[str, object] values: Keys to change. Names match the object returned for that group.
+        :returns: The setting group after the change.
+        :rtype: dict[str, object] | list[dict[str, object]]
+        :raises ValueError: ``name`` is unknown, ``values`` is empty, or a key cannot be changed.
+        :raises OpticStudioError: The session is already closed, or OpticStudio cannot answer.
+        """
+
+        if not values:
+            raise ValueError('values must contain the keys to change.')
+
+        section = setting_group(name)
+
+        def change():
+            section.write(self._system.SystemData, values)
+
+            return section.read(self._system.SystemData)
+
+        return self.call(change)
 
     def call(self, function):
         """
@@ -318,6 +344,8 @@ class Attribute:
     :param convert: Converts the raw value.
     :type convert: collections.abc.Callable[[object], object]
     :param bool call: When true, call the last member before converting it.
+    :param bool writable: When true, ``set_system_settings`` may change this member.
+    :param str | None enumeration: ZOS-API enumeration type in ``ZOSAPI.SystemData``. ``None`` when the member is not an enumeration.
     """
 
     #: Key in the result.
@@ -328,6 +356,10 @@ class Attribute:
     convert: collections.abc.Callable[[object], object]
     #: When true, call the last member before converting it.
     call: bool = False
+    #: When true, ``set_system_settings`` may change this member.
+    writable: bool = True
+    #: ZOS-API enumeration type in ``ZOSAPI.SystemData``. ``None`` when the member is not an enumeration.
+    enumeration: str | None = None
 
     def read(self, data) -> object:
         """
@@ -339,16 +371,63 @@ class Attribute:
         """
 
         # Walk a property path, then optionally call the last member.
-        path = self.source if isinstance(self.source, tuple) else (self.source,)
-        raw = data
-
-        for name in path:
-            raw = getattr(raw, name)
+        parent, leaf = self._parent_and_leaf(data)
+        raw = getattr(parent, leaf)
 
         if self.call:
             raw = raw()
 
         return self.convert(raw)
+
+    def value_for_write(self, value: object) -> object:
+        """
+        Convert a tool value into the value stored by ZOS-API.
+
+        :param object value: Value supplied for this member.
+        :returns: The value to assign.
+        :rtype: object
+        :raises ValueError: ``value`` does not match this member.
+        """
+
+        if self.enumeration is not None:
+            if not isinstance(value, str):
+                raise ValueError(f'{self.name} must be a string.')
+
+            return _enum_member(self.enumeration, self.name, value)
+
+        if self.convert is bool:
+            if not isinstance(value, bool):
+                raise ValueError(f'{self.name} must be a boolean.')
+
+            return value
+
+        if self.convert is int:
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                raise ValueError(f'{self.name} must be an integer.')
+
+            if isinstance(value, float) and not value.is_integer():
+                raise ValueError(f'{self.name} must be an integer.')
+
+            return int(value)
+
+        if self.convert is float:
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                raise ValueError(f'{self.name} must be a number.')
+
+            return float(value)
+
+        raise ValueError(f'{self.name} cannot be changed.')
+
+    def assign(self, data, value: object) -> None:
+        """
+        Assign a tool value to this member.
+
+        :param data: Object that exposes ``source``.
+        :param object value: Value supplied for this member.
+        :raises ValueError: ``value`` does not match this member.
+        """
+
+        self._place(data, self.value_for_write(value))
 
     @classmethod
     def record(cls, data, attributes: tuple['Attribute', ...]) -> dict[str, object]:
@@ -362,6 +441,27 @@ class Attribute:
         """
 
         return {item.name: item.read(data) for item in attributes}
+
+    def _parent_and_leaf(self, data):
+        # The last path entry is the member. Earlier entries are the objects that contain it.
+        path = self.source if isinstance(self.source, tuple) else (self.source,)
+        parent = data
+
+        for name in path[:-1]:
+            parent = getattr(parent, name)
+
+        return parent, path[-1]
+
+    def _place(self, data, value: object) -> None:
+        # ``value`` is already converted. A getter such as GetFieldType is written through SetFieldType.
+        parent, leaf = self._parent_and_leaf(data)
+
+        if self.call:
+            getattr(parent, 'Set' + leaf[3:])(value)
+
+            return
+
+        setattr(parent, leaf, value)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -438,6 +538,39 @@ class Section:
 
         return result
 
+    def write(self, system_data, values: dict[str, object]) -> None:
+        """
+        Change selected members of this section.
+
+        :param system_data: The ZOS-API ``SystemData`` object.
+        :param dict[str, object] values: Keys to change. Names match :meth:`read`.
+        :raises ValueError: A key is unknown, read-only, or names a list of rows.
+        """
+
+        by_name = {item.name: item for item in self.attributes}
+        row_names = {name for name, _rows in self.rows}
+        prepared = []
+
+        for key, value in values.items():
+            if key in row_names:
+                raise ValueError(f'{key} is a list of rows and cannot be changed with set_system_settings.')
+
+            attribute = by_name.get(key)
+
+            if attribute is None:
+                allowed = ', '.join(item.name for item in self.attributes if item.writable)
+                raise ValueError(f'Unknown setting {key!r}. Expected one of: {allowed}.')
+
+            if not attribute.writable:
+                raise ValueError(f'{key} is read-only.')
+
+            prepared.append((attribute, attribute.value_for_write(value)))
+
+        data = getattr(system_data, self.source)
+
+        for attribute, value in prepared:
+            attribute._place(data, value)
+
 
 @dataclasses.dataclass(frozen=True)
 class Listing:
@@ -464,29 +597,74 @@ class Listing:
 
         return self.rows.read(getattr(system_data, self.source))
 
+    def write(self, system_data, values: dict[str, object]) -> None:
+        """
+        Reject a write to a list of rows.
 
-#: System Explorer sections, keyed by the name passed to OpticStudioSession.system_data.
+        :param system_data: The ZOS-API ``SystemData`` object.
+        :param dict[str, object] values: Keys to change.
+        :raises ValueError: This group is a list of rows.
+        """
+
+        raise ValueError('This setting group is a list of rows and cannot be changed with set_system_settings.')
+
+
+def setting_group(name: str) -> Section | Listing:
+    """
+    Return one System Explorer setting group.
+
+    :param str name: ``units``, ``aperture``, ``fields``, ``wavelengths``, ``environment``, ``polarization``, or ``ray_aiming``.
+    :returns: The group.
+    :rtype: Section | Listing
+    :raises ValueError: ``name`` is not a setting group.
+    """
+
+    try:
+        return SYSTEM[name]
+    except KeyError:
+        choices = ', '.join(SYSTEM)
+        raise ValueError(f'Unknown system setting group {name!r}. Expected one of: {choices}.') from None
+
+
+def _enum_member(enumeration: str, key: str, value: str):
+    # Resolve the enumeration on the ZOS-API thread, where ZOSAPI is already loaded.
+    import clr
+    import System
+    import ZOSAPI
+
+    enum = getattr(ZOSAPI.SystemData, enumeration)
+    clr_type = clr.GetClrType(enum)
+    names = list(System.Enum.GetNames(clr_type))
+
+    if value not in names:
+        choices = ', '.join(names)
+        raise ValueError(f'{key} must be one of: {choices}.')
+
+    return System.Enum.Parse(clr_type, value)
+
+
+#: System Explorer setting groups, keyed by the name passed to OpticStudioSession.system_data.
 SYSTEM: dict[str, Section | Listing] = {
     'units': Section(
         'Units',
         (
-            Attribute('lens_units', 'LensUnits', str),
-            Attribute('source_unit_prefix', 'SourceUnitPrefix', str),
-            Attribute('source_units', 'SourceUnits', str),
-            Attribute('analysis_unit_prefix', 'AnalysisUnitPrefix', str),
-            Attribute('analysis_units', 'AnalysisUnits', str),
-            Attribute('afocal_mode_units', 'AfocalModeUnits', str),
-            Attribute('mtf_units', 'MTFUnits', str),
+            Attribute('lens_units', 'LensUnits', str, enumeration='ZemaxSystemUnits'),
+            Attribute('source_unit_prefix', 'SourceUnitPrefix', str, enumeration='ZemaxUnitPrefix'),
+            Attribute('source_units', 'SourceUnits', str, enumeration='ZemaxSourceUnits'),
+            Attribute('analysis_unit_prefix', 'AnalysisUnitPrefix', str, enumeration='ZemaxUnitPrefix'),
+            Attribute('analysis_units', 'AnalysisUnits', str, enumeration='ZemaxAnalysisUnits'),
+            Attribute('afocal_mode_units', 'AfocalModeUnits', str, enumeration='ZemaxAfocalModeUnits'),
+            Attribute('mtf_units', 'MTFUnits', str, enumeration='ZemaxMTFUnits'),
         ),
     ),
     'aperture': Section(
         'Aperture',
         (
-            Attribute('aperture_type', 'ApertureType', str),
+            Attribute('aperture_type', 'ApertureType', str, enumeration='ZemaxApertureType'),
             Attribute('aperture_value', 'ApertureValue', float),
-            Attribute('apodization_type', 'ApodizationType', str),
+            Attribute('apodization_type', 'ApodizationType', str, enumeration='ZemaxApodizationType'),
             Attribute('apodization_factor', 'ApodizationFactor', float),
-            Attribute('apodization_factor_is_used', 'ApodizationFactorIsUsed', bool),
+            Attribute('apodization_factor_is_used', 'ApodizationFactorIsUsed', bool, writable=False),
             Attribute('semi_diameter_margin', 'SemiDiameterMargin', float),
             Attribute('semi_diameter_margin_percent', 'SemiDiameterMarginPct', float),
             Attribute('global_coordinate_reference_surface', ('GCRS', 'GetSelectedSurface'), int, call=True),
@@ -500,8 +678,8 @@ SYSTEM: dict[str, Section | Listing] = {
     'fields': Section(
         'Fields',
         (
-            Attribute('type', 'GetFieldType', str, call=True),
-            Attribute('normalization', 'Normalization', str),
+            Attribute('type', 'GetFieldType', str, call=True, enumeration='FieldType'),
+            Attribute('normalization', 'Normalization', str, enumeration='FieldNormalizationType'),
         ),
         (
             (
@@ -555,7 +733,7 @@ SYSTEM: dict[str, Section | Listing] = {
     'polarization': Section(
         'Polarization',
         (
-            Attribute('method', 'Method', str),
+            Attribute('method', 'Method', str, enumeration='PolarizationMethod'),
             Attribute('unpolarized', 'Unpolarized', bool),
             Attribute('jx', 'Jx', float),
             Attribute('jy', 'Jy', float),
@@ -567,8 +745,8 @@ SYSTEM: dict[str, Section | Listing] = {
     'ray_aiming': Section(
         'RayAiming',
         (
-            Attribute('setting', 'RayAiming', str),
-            Attribute('method', 'Method', str),
+            Attribute('setting', 'RayAiming', str, enumeration='RayAimingMethod'),
+            Attribute('method', 'Method', str, enumeration='RayAimingType'),
             Attribute('use_ray_aiming_cache', 'UseRayAimingCache', bool),
             Attribute('use_robust_ray_aiming', 'UseRobustRayAiming', bool),
             Attribute('scale_pupil_shift_factors_by_field', 'ScalePupilShiftFactorsByField', bool),
