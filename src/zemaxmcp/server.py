@@ -270,6 +270,7 @@ def create_server() -> mcp.server.MCPServer:
     @server.tool(
         description=(
             'Change one group of settings in System Explorer. '
+            'Fields in `values` are the same fields returned by `get_system_settings` for that group. '
             'Only keys in `values` are written. '
             'Field points and wavelengths are lists of rows. Change those with `set_system_rows`.'
         ),
@@ -291,7 +292,7 @@ def create_server() -> mcp.server.MCPServer:
         Change keys in one System Explorer setting group and return the group.
 
         :param section: ``units``, ``aperture``, ``fields``, ``wavelengths``, ``environment``, ``polarization``, or ``ray_aiming``.
-        :param values: Keys to change. Names and units match the object returned by :meth:`get_system_settings` for ``section``. ``apodization_factor_is_used`` is read-only. ``points`` and ``wavelengths`` are lists of rows; change them with :meth:`set_system_rows`.
+        :param values: Keys to change. The fields are the same as those returned by :meth:`get_system_settings` for ``section``. ``apodization_factor_is_used`` is read-only. ``points`` and ``wavelengths`` are lists of rows; change them with :meth:`set_system_rows`.
         :returns: The setting group after the change.
         :rtype: dict[str, object] | list[dict[str, object]]
         :raises ValueError: ``section`` is unknown, ``values`` is empty, or a key cannot be changed.
@@ -304,6 +305,7 @@ def create_server() -> mcp.server.MCPServer:
             'Change one field point or wavelength in System Explorer. '
             '`action` is `change`, `add`, `remove`, or `make_primary`. '
             '`number` is the 1-based row. `add` appends a row and does not use `number`. '
+            '`values` uses the same fields as one row returned by `get_system_settings`. '
             '`make_primary` selects the primary wavelength.'
         ),
     )
@@ -320,7 +322,7 @@ def create_server() -> mcp.server.MCPServer:
         :param section: ``fields`` or ``wavelengths``.
         :param action: ``change``, ``add``, ``remove``, or ``make_primary``.
         :param number: 1-based row. Required for ``change``, ``remove``, and ``make_primary``. ``add`` appends a row.
-        :param values: Keys to write. Names match the row returned by :meth:`get_system_settings`. Omit ``values`` for ``remove`` and ``make_primary``.
+        :param values: Keys to write. The fields are the same as those of one row returned by :meth:`get_system_settings`. Omit ``values`` for ``remove`` and ``make_primary``.
 
             **fields**
 
@@ -354,6 +356,69 @@ def create_server() -> mcp.server.MCPServer:
         """
 
         return read(ctx, lambda session: session.set_system_rows(section, action, number, values))
+
+    @server.tool(
+        description='Return the Lens Data Editor surfaces, or one surface when `surface` is given.',
+    )
+    def get_lens_data(
+        ctx: mcp.server.mcpserver.Context,
+        surface: int | None = None,
+    ) -> dict[str, object]:
+        """
+        Return the Lens Data Editor surfaces for the lens open in the OpticStudio window.
+
+        Pass ``surface`` to read one surface. Omit it to read every surface.
+
+        :param surface: Surface number. 0 is the object surface. ``None`` reads every surface.
+        :returns: Without ``surface``, ``surfaces``. With ``surface``, that surface.
+
+            * **surfaces** -- One entry per surface, starting with the object surface at surface 0. Present when ``surface`` is omitted.
+            * **surface_number** -- Surface number. 0 is the object surface.
+            * **is_stop** -- True when the surface is the stop.
+            * **type** -- Surface type, such as ``Standard``. This value is read-only.
+            * **comment** -- Surface comment. Empty when the surface has no comment.
+            * **radius** -- Radius of curvature, in lens units.
+            * **thickness** -- Thickness to the next surface, in lens units.
+            * **material** -- Glass name. Empty when the surface is air.
+            * **coating** -- Coating name. Empty when the surface has no coating.
+            * **semi_diameter** -- Clear semi-diameter, in lens units.
+            * **chip_zone** -- Chip zone, in lens units.
+            * **mechanical_semi_diameter** -- Mechanical semi-diameter, in lens units.
+            * **conic** -- Conic constant.
+            * **tce** -- Thermal coefficient of expansion stored for the surface.
+        :rtype: dict[str, object]
+        :raises ValueError: ``surface`` is outside the editor.
+        """
+
+        return read(ctx, lambda session: session.lens_data(surface))
+
+    @server.tool(
+        description=(
+            'Change, insert, or remove one surface in the Lens Data Editor. '
+            '`action` is `change`, `add`, or `remove`. '
+            '`number` is the surface number, and `0` is the object surface. '
+            '`add` inserts a surface at `number`. '
+            '`values` uses the same fields as one surface returned by `get_lens_data`.'
+        ),
+    )
+    def set_lens_rows(
+        ctx: mcp.server.mcpserver.Context,
+        action: typing.Literal['change', 'add', 'remove'],
+        number: int,
+        values: dict[str, str | float | bool | int] | None = None,
+    ) -> dict[str, object]:
+        """
+        Change, insert, or remove one Lens Data Editor surface and return the editor.
+
+        :param action: ``change``, ``add``, or ``remove``.
+        :param number: Surface number. 0 is the object surface. ``add`` inserts at this number, and following surfaces move up. The new surface is a ``Standard`` surface.
+        :param values: Keys to write. The fields are the same as those of one surface returned by :meth:`get_lens_data`. Omit ``values`` to insert a default surface or to remove a surface. ``surface_number`` and ``type`` are read-only. Setting ``is_stop`` to true makes that surface the stop. The object and image surfaces cannot be removed.
+        :returns: The surfaces after the change.
+        :rtype: dict[str, object]
+        :raises ValueError: The action, number, or values cannot be applied.
+        """
+
+        return read(ctx, lambda session: session.set_lens_rows(action, number, values))
 
     return server
 

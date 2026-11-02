@@ -147,7 +147,7 @@ class OpticStudioSession:
         Only keys in ``values`` are written. Field points and the wavelength list are rows and stay unchanged.
 
         :param str name: Setting group. The same names as :meth:`system_data`.
-        :param dict[str, object] values: Keys to change. Names match the object returned for that group.
+        :param dict[str, object] values: Keys to change. The fields are the same as those returned by :meth:`system_data` for that group.
         :returns: The setting group after the change.
         :rtype: dict[str, object] | list[dict[str, object]]
         :raises ValueError: ``name`` is unknown, ``values`` is empty, or a key cannot be changed.
@@ -181,7 +181,7 @@ class OpticStudioSession:
         :param str name: ``fields`` or ``wavelengths``.
         :param str action: ``change``, ``add``, ``remove``, or ``make_primary``.
         :param int | None number: 1-based row. Required for ``change``, ``remove``, and ``make_primary``.
-        :param dict[str, object] | None values: Keys to write. Names match the row returned for ``name``.
+        :param dict[str, object] | None values: Keys to write. The fields are the same as those of one row returned by :meth:`system_data`.
         :returns: The rows after the change. Field rows are the field points.
         :rtype: list[dict[str, object]]
         :raises ValueError: ``name`` has no row list, or the action, number, or values cannot be applied.
@@ -195,6 +195,47 @@ class OpticStudioSession:
             rows.edit(data, action, number, values)
 
             return rows.read(data)
+
+        return self.call(change)
+
+    def lens_data(self, surface: int | None = None) -> dict[str, object]:
+        """
+        Return Lens Data Editor surfaces for the lens open in the OpticStudio window.
+
+        :param int | None surface: One surface number. ``None`` reads every surface. 0 is the object surface.
+        :returns: Every surface, or the one requested surface.
+        :rtype: dict[str, object]
+        :raises ValueError: ``surface`` is outside the editor.
+        :raises OpticStudioError: The session is already closed, or OpticStudio cannot answer.
+        """
+
+        return self.call(lambda: LENS.read(self._system.LDE, surface))
+
+    def set_lens_rows(
+        self,
+        action: str,
+        number: int | None,
+        values: dict[str, object] | None,
+    ) -> dict[str, object]:
+        """
+        Change, insert, or remove one Lens Data Editor surface and return the editor.
+
+        ``add`` inserts a surface at ``number``. Surfaces at that number and after move up.
+
+        :param str action: ``change``, ``add``, or ``remove``.
+        :param int | None number: Surface number. 0 is the object surface.
+        :param dict[str, object] | None values: Keys to write. The fields are the same as those of one surface returned by :meth:`lens_data`.
+        :returns: The surfaces after the change.
+        :rtype: dict[str, object]
+        :raises ValueError: The action, number, or values cannot be applied.
+        :raises OpticStudioError: The session is already closed, or OpticStudio cannot answer.
+        """
+
+        def change():
+            editor = self._system.LDE
+            LENS.edit(editor, action, number, values)
+
+            return LENS.read(editor)
 
         return self.call(change)
 
@@ -981,6 +1022,180 @@ SYSTEM: dict[str, Section | Listing] = {
         ),
     ),
 }
+
+
+@dataclasses.dataclass(frozen=True)
+class LensData:
+    """
+    Lens Data Editor columns copied for every surface.
+
+    :param attributes: Columns read from each surface.
+    :type attributes: tuple[Attribute, ...]
+    """
+
+    #: Columns read from each surface.
+    attributes: tuple[Attribute, ...]
+
+    def read(self, editor, surface: int | None = None) -> dict[str, object]:
+        """
+        Read every surface, or one surface.
+
+        :param editor: The ZOS-API lens data editor.
+        :param int | None surface: One surface number. ``None`` reads every surface. 0 is the object surface.
+        :returns: ``surfaces``, or the one requested surface. Each surface includes ``is_stop``.
+        :rtype: dict[str, object]
+        :raises ValueError: ``surface`` is outside the editor.
+        """
+
+        if surface is not None:
+            index = self._surface_number(editor, surface, inserting=False)
+
+            return Attribute.record(editor.GetSurfaceAt(index), self.attributes)
+
+        total = int(editor.NumberOfSurfaces)
+        surfaces = []
+
+        for index in range(total):
+            surfaces.append(Attribute.record(editor.GetSurfaceAt(index), self.attributes))
+
+        return {
+            'surfaces': surfaces,
+        }
+
+    def edit(
+        self,
+        editor,
+        action: str,
+        number: int | None,
+        values: dict[str, object] | None,
+    ) -> None:
+        """
+        Change, insert, or remove one surface.
+
+        ``add`` inserts at ``number`` and then writes ``values``.
+
+        :param editor: The ZOS-API lens data editor.
+        :param str action: ``change``, ``add``, or ``remove``.
+        :param int | None number: Surface number. 0 is the object surface.
+        :param dict[str, object] | None values: Keys to write. The fields are the same as those returned by :meth:`read`.
+        :raises ValueError: The action, number, or values cannot be applied.
+        """
+
+        supplied = {} if values is None else values
+
+        if action == 'change':
+            self._change(editor, number, supplied)
+
+            return
+
+        if action == 'add':
+            self._add(editor, number, supplied)
+
+            return
+
+        if action == 'remove':
+            self._remove(editor, number, supplied)
+
+            return
+
+        raise ValueError("action must be 'change', 'add', or 'remove'.")
+
+    def _change(self, editor, number: int | None, values: dict[str, object]) -> None:
+        if not values:
+            raise ValueError('values must contain the keys to change.')
+
+        index = self._surface_number(editor, number, inserting=False)
+        prepared = self._prepare(values)
+        row = editor.GetSurfaceAt(index)
+
+        for attribute, value in prepared:
+            attribute._place(row, value)
+
+    def _add(self, editor, number: int | None, values: dict[str, object]) -> None:
+        index = self._surface_number(editor, number, inserting=True)
+        prepared = self._prepare(values)
+        row = editor.InsertNewSurfaceAt(index)
+
+        if row is None:
+            raise ValueError(f'Surface {index} could not be inserted.')
+
+        for attribute, value in prepared:
+            attribute._place(row, value)
+
+    def _remove(self, editor, number: int | None, values: dict[str, object]) -> None:
+        if values:
+            raise ValueError('remove does not take values.')
+
+        index = self._surface_number(editor, number, inserting=False)
+        row = editor.GetSurfaceAt(index)
+
+        if bool(row.IsObject):
+            raise ValueError('The object surface cannot be removed.')
+
+        if bool(row.IsImage):
+            raise ValueError('The image surface cannot be removed.')
+
+        removed = editor.RemoveSurfaceAt(index)
+
+        if removed is False:
+            raise ValueError(f'Surface {index} could not be removed.')
+
+    def _prepare(self, values: dict[str, object]) -> list[tuple[Attribute, object]]:
+        # Convert every value before changing a surface, so a bad key leaves the editor unchanged.
+        by_name = {item.name: item for item in self.attributes}
+        prepared = []
+
+        for key, value in values.items():
+            attribute = by_name.get(key)
+
+            if attribute is None:
+                allowed = ', '.join(item.name for item in self.attributes if item.writable)
+                raise ValueError(f'Unknown setting {key!r}. Expected one of: {allowed}.')
+
+            if not attribute.writable:
+                raise ValueError(f'{key} is read-only.')
+
+            prepared.append((attribute, attribute.value_for_write(value)))
+
+        return prepared
+
+    def _surface_number(self, editor, number: int | None, inserting: bool) -> int:
+        if isinstance(number, bool) or not isinstance(number, int):
+            raise ValueError('number is required.')
+
+        total = int(editor.NumberOfSurfaces)
+        last = total - 1
+
+        if inserting:
+            if number < 1 or number > last:
+                raise ValueError(f'number must be from 1 to {last}.')
+
+            return number
+
+        if number < 0 or number > last:
+            raise ValueError(f'number must be from 0 to {last}.')
+
+        return number
+
+
+#: Columns copied from every Lens Data Editor surface.
+LENS = LensData(
+    (
+        Attribute('surface_number', 'SurfaceNumber', int, writable=False),
+        Attribute('type', 'Type', str, writable=False),
+        Attribute('comment', 'Comment', text),
+        Attribute('radius', 'Radius', float),
+        Attribute('thickness', 'Thickness', float),
+        Attribute('material', 'Material', text),
+        Attribute('coating', 'Coating', text),
+        Attribute('semi_diameter', 'SemiDiameter', float),
+        Attribute('chip_zone', 'ChipZone', float),
+        Attribute('mechanical_semi_diameter', 'MechanicalSemiDiameter', float),
+        Attribute('conic', 'Conic', float),
+        Attribute('tce', 'TCE', float),
+        Attribute('is_stop', 'IsStop', bool),
+    ),
+)
 
 
 def _initialize_sta():
