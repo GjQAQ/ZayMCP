@@ -271,7 +271,7 @@ def create_server() -> mcp.server.MCPServer:
         description=(
             'Change one group of settings in System Explorer. '
             'Only keys in `values` are written. '
-            'Field points and wavelengths are lists of rows and cannot be changed with this tool.'
+            'Field points and wavelengths are lists of rows. Change those with `set_system_rows`.'
         ),
     )
     def set_system_settings(
@@ -291,13 +291,69 @@ def create_server() -> mcp.server.MCPServer:
         Change keys in one System Explorer setting group and return the group.
 
         :param section: ``units``, ``aperture``, ``fields``, ``wavelengths``, ``environment``, ``polarization``, or ``ray_aiming``.
-        :param values: Keys to change. Names and units match the object returned by :meth:`get_system_settings` for ``section``. ``apodization_factor_is_used`` is read-only. ``points`` and ``wavelengths`` are lists of rows.
+        :param values: Keys to change. Names and units match the object returned by :meth:`get_system_settings` for ``section``. ``apodization_factor_is_used`` is read-only. ``points`` and ``wavelengths`` are lists of rows; change them with :meth:`set_system_rows`.
         :returns: The setting group after the change.
         :rtype: dict[str, object] | list[dict[str, object]]
         :raises ValueError: ``section`` is unknown, ``values`` is empty, or a key cannot be changed.
         """
 
         return read(ctx, lambda session: session.set_system_data(section, values))
+
+    @server.tool(
+        description=(
+            'Change one field point or wavelength in System Explorer. '
+            '`action` is `change`, `add`, `remove`, or `make_primary`. '
+            '`number` is the 1-based row. `add` appends a row and does not use `number`. '
+            '`make_primary` selects the primary wavelength.'
+        ),
+    )
+    def set_system_rows(
+        ctx: mcp.server.mcpserver.Context,
+        section: typing.Literal['fields', 'wavelengths'],
+        action: typing.Literal['change', 'add', 'remove', 'make_primary'],
+        number: int | None = None,
+        values: dict[str, str | float | bool | int] | None = None,
+    ) -> list[dict[str, object]]:
+        """
+        Change, add, or remove one field point or wavelength and return the rows.
+
+        :param section: ``fields`` or ``wavelengths``.
+        :param action: ``change``, ``add``, ``remove``, or ``make_primary``.
+        :param number: 1-based row. Required for ``change``, ``remove``, and ``make_primary``. ``add`` appends a row.
+        :param values: Keys to write. Names match the row returned by :meth:`get_system_settings`. Omit ``values`` for ``remove`` and ``make_primary``.
+
+            **fields**
+
+            ``add`` requires ``x``, ``y``, and ``weight``. ``x`` and ``y`` are degrees for ``Angle`` and ``TheodoliteAngle``, and lens units for the height types.
+
+            * **x** -- X field coordinate.
+            * **y** -- Y field coordinate.
+            * **weight** -- Relative field weight.
+            * **vdx** -- Vignetting decenter in X, as a fraction of the pupil.
+            * **vdy** -- Vignetting decenter in Y, as a fraction of the pupil.
+            * **vcx** -- Vignetting compression in X, as a fraction of the pupil.
+            * **vcy** -- Vignetting compression in Y, as a fraction of the pupil.
+            * **van** -- Vignetting angle, in degrees.
+            * **tan** -- Tangential angle, in degrees.
+            * **comment** -- Field comment.
+            * **ignore** -- True when the field is ignored.
+
+            ``number``, ``active``, ``x_solve``, and ``y_solve`` are read-only.
+
+            **wavelengths**
+
+            ``add`` requires ``wavelength`` and ``weight``. ``wavelength`` is in micrometers.
+
+            * **wavelength** -- Wavelength in micrometers.
+            * **weight** -- Relative wavelength weight.
+
+            ``number``, ``active``, and ``primary`` are read-only. ``make_primary`` selects the primary wavelength.
+        :returns: The rows after the change. For ``fields``, these are the field points.
+        :rtype: list[dict[str, object]]
+        :raises ValueError: ``section`` has no row list, or the action, number, or values cannot be applied.
+        """
+
+        return read(ctx, lambda session: session.set_system_rows(section, action, number, values))
 
     return server
 

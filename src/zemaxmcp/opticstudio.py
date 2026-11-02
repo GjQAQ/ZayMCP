@@ -166,6 +166,38 @@ class OpticStudioSession:
 
         return self.call(change)
 
+    def set_system_rows(
+        self,
+        name: str,
+        action: str,
+        number: int | None,
+        values: dict[str, object] | None,
+    ) -> list[dict[str, object]]:
+        """
+        Change, add, or remove one field point or wavelength, then return the rows.
+
+        ``add`` appends a row. ``make_primary`` selects the primary wavelength.
+
+        :param str name: ``fields`` or ``wavelengths``.
+        :param str action: ``change``, ``add``, ``remove``, or ``make_primary``.
+        :param int | None number: 1-based row. Required for ``change``, ``remove``, and ``make_primary``.
+        :param dict[str, object] | None values: Keys to write. Names match the row returned for ``name``.
+        :returns: The rows after the change. Field rows are the field points.
+        :rtype: list[dict[str, object]]
+        :raises ValueError: ``name`` has no row list, or the action, number, or values cannot be applied.
+        :raises OpticStudioError: The session is already closed, or OpticStudio cannot answer.
+        """
+
+        source, rows = row_editor(name)
+
+        def change():
+            data = getattr(self._system.SystemData, source)
+            rows.edit(data, action, number, values)
+
+            return rows.read(data)
+
+        return self.call(change)
+
     def call(self, function):
         """
         Run a function on the ZOS-API thread and return its result.
@@ -344,7 +376,7 @@ class Attribute:
     :param convert: Converts the raw value.
     :type convert: collections.abc.Callable[[object], object]
     :param bool call: When true, call the last member before converting it.
-    :param bool writable: When true, ``set_system_settings`` may change this member.
+    :param bool writable: When true, a write tool may change this member.
     :param str | None enumeration: ZOS-API enumeration type in ``ZOSAPI.SystemData``. ``None`` when the member is not an enumeration.
     """
 
@@ -356,7 +388,7 @@ class Attribute:
     convert: collections.abc.Callable[[object], object]
     #: When true, call the last member before converting it.
     call: bool = False
-    #: When true, ``set_system_settings`` may change this member.
+    #: When true, a write tool may change this member.
     writable: bool = True
     #: ZOS-API enumeration type in ``ZOSAPI.SystemData``. ``None`` when the member is not an enumeration.
     enumeration: str | None = None
@@ -416,6 +448,12 @@ class Attribute:
 
             return float(value)
 
+        if self.convert is text:
+            if not isinstance(value, str):
+                raise ValueError(f'{self.name} must be a string.')
+
+            return value
+
         raise ValueError(f'{self.name} cannot be changed.')
 
     def assign(self, data, value: object) -> None:
@@ -473,6 +511,11 @@ class Rows:
     :param str item: Method that returns one row. The argument is a 1-based index.
     :param attributes: Attributes copied from each row.
     :type attributes: tuple[Attribute, ...]
+    :param str | None add: Method that appends a row. ``None`` when rows cannot be added.
+    :param add_arguments: Attribute names passed to ``add``, in order.
+    :type add_arguments: tuple[str, ...]
+    :param str | None remove: Method that removes a 1-based row. ``None`` when rows cannot be removed.
+    :param str | None primary: Method on one row that makes it primary. ``None`` when the list has no primary row.
     """
 
     #: Property that holds the number of rows.
@@ -481,6 +524,14 @@ class Rows:
     item: str
     #: Attributes copied from each row.
     attributes: tuple[Attribute, ...]
+    #: Method that appends a row. ``None`` when rows cannot be added.
+    add: str | None = None
+    #: Attribute names passed to ``add``, in order.
+    add_arguments: tuple[str, ...] = ()
+    #: Method that removes a 1-based row. ``None`` when rows cannot be removed.
+    remove: str | None = None
+    #: Method on one row that makes it primary. ``None`` when the list has no primary row.
+    primary: str | None = None
 
     def read(self, data) -> list[dict[str, object]]:
         """
@@ -500,6 +551,135 @@ class Rows:
             rows.append(Attribute.record(getter(index), self.attributes))
 
         return rows
+
+    def edit(
+        self,
+        data,
+        action: str,
+        number: int | None,
+        values: dict[str, object] | None,
+    ) -> None:
+        """
+        Change, add, or remove one row.
+
+        ``add`` appends a row. ``make_primary`` calls :attr:`primary` on the selected row.
+
+        :param data: Object that exposes ``count`` and ``item``.
+        :param str action: ``change``, ``add``, ``remove``, or ``make_primary``.
+        :param int | None number: 1-based row. Required except for ``add``.
+        :param dict[str, object] | None values: Keys to write. Names match :meth:`read`.
+        :raises ValueError: The action, number, or values cannot be applied.
+        """
+
+        supplied = {} if values is None else values
+
+        if action == 'add':
+            self._add(data, number, supplied)
+
+            return
+
+        if action == 'change':
+            self._change(data, number, supplied)
+
+            return
+
+        if action in ('remove', 'make_primary'):
+            self._select(data, action, number, supplied)
+
+            return
+
+        raise ValueError("action must be 'change', 'add', 'remove', or 'make_primary'.")
+
+    def _add(self, data, number: int | None, values: dict[str, object]) -> None:
+        if self.add is None:
+            raise ValueError('Rows cannot be added to this list.')
+
+        if number is not None:
+            raise ValueError('add appends a row and does not take a number.')
+
+        missing = [key for key in self.add_arguments if key not in values]
+
+        if missing:
+            required = ', '.join(self.add_arguments)
+            raise ValueError(f'add requires {required}.')
+
+        prepared = self._prepare(values)
+        extras = [(attribute, value) for attribute, value in prepared if attribute.name not in self.add_arguments]
+
+        # Arguments follow add_arguments, not the order of values.
+        by_name = {attribute.name: value for attribute, value in prepared}
+        row = getattr(data, self.add)(*(by_name[key] for key in self.add_arguments))
+
+        for attribute, value in extras:
+            attribute._place(row, value)
+
+    def _change(self, data, number: int | None, values: dict[str, object]) -> None:
+        if not values:
+            raise ValueError('values must contain the keys to change.')
+
+        prepared = self._prepare(values)
+        row = self._row(data, self._row_number(data, number))
+
+        for attribute, value in prepared:
+            attribute._place(row, value)
+
+    def _select(self, data, action: str, number: int | None, values: dict[str, object]) -> None:
+        if values:
+            raise ValueError(f'{action} does not take values.')
+
+        if action == 'make_primary':
+            if self.primary is None:
+                raise ValueError('This row list has no primary row.')
+
+            row = self._row(data, self._row_number(data, number))
+            getattr(row, self.primary)()
+
+            return
+
+        if self.remove is None:
+            raise ValueError('Rows cannot be removed from this list.')
+
+        row_number = self._row_number(data, number)
+        removed = getattr(data, self.remove)(row_number)
+
+        if removed is False:
+            raise ValueError(f'Row {number} could not be removed.')
+
+    def _prepare(self, values: dict[str, object]) -> list[tuple[Attribute, object]]:
+        # Convert every value before changing a row, so a bad key leaves the row unchanged.
+        by_name = {item.name: item for item in self.attributes}
+        prepared = []
+
+        for key, value in values.items():
+            attribute = by_name.get(key)
+
+            if attribute is None:
+                allowed = ', '.join(item.name for item in self.attributes if item.writable)
+                raise ValueError(f'Unknown setting {key!r}. Expected one of: {allowed}.')
+
+            if not attribute.writable:
+                if key == 'primary' and self.primary is not None:
+                    raise ValueError('primary is read-only. Use make_primary.')
+
+                raise ValueError(f'{key} is read-only.')
+
+            prepared.append((attribute, attribute.value_for_write(value)))
+
+        return prepared
+
+    def _row(self, data, number: int):
+        return getattr(data, self.item)(number)
+
+    def _row_number(self, data, number: int | None) -> int:
+        if isinstance(number, bool) or not isinstance(number, int):
+            raise ValueError('number is required.')
+
+        total = int(getattr(data, self.count))
+
+        if number < 1 or number > total:
+            raise ValueError(f'number must be from 1 to {total}.')
+
+        return number
 
 
 @dataclasses.dataclass(frozen=True)
@@ -626,6 +806,37 @@ def setting_group(name: str) -> Section | Listing:
         raise ValueError(f'Unknown system setting group {name!r}. Expected one of: {choices}.') from None
 
 
+def row_editor(name: str) -> tuple[str, Rows]:
+    """
+    Return the SystemData property and row list for one editable group.
+
+    :param str name: ``fields`` or ``wavelengths``.
+    :returns: The property name on SystemData, and the rows to edit.
+    :rtype: tuple[str, Rows]
+    :raises ValueError: ``name`` is not a setting group, or that group has no row list.
+    """
+
+    group = setting_group(name)
+    editor = _row_editor(group)
+
+    if editor is None:
+        choices = ', '.join(label for label, item in SYSTEM.items() if _row_editor(item) is not None)
+        raise ValueError(f'{name} has no row list. Expected one of: {choices}.')
+
+    return editor
+
+
+def _row_editor(group: Section | Listing) -> tuple[str, Rows] | None:
+    # A listing is the row list. A section contributes its one editable collection.
+    if isinstance(group, Listing) and group.rows.add is not None:
+        return group.source, group.rows
+
+    if isinstance(group, Section) and len(group.rows) == 1 and group.rows[0][1].add is not None:
+        return group.source, group.rows[0][1]
+
+    return None
+
+
 def _enum_member(enumeration: str, key: str, value: str):
     # Resolve the enumeration on the ZOS-API thread, where ZOSAPI is already loaded.
     import clr
@@ -688,8 +899,8 @@ SYSTEM: dict[str, Section | Listing] = {
                     'NumberOfFields',
                     'GetField',
                     (
-                        Attribute('number', 'FieldNumber', int),
-                        Attribute('active', 'IsActive', bool),
+                        Attribute('number', 'FieldNumber', int, writable=False),
+                        Attribute('active', 'IsActive', bool, writable=False),
                         Attribute('x', 'X', float),
                         Attribute('y', 'Y', float),
                         Attribute('weight', 'Weight', float),
@@ -700,10 +911,13 @@ SYSTEM: dict[str, Section | Listing] = {
                         Attribute('van', 'VAN', float),
                         Attribute('tan', 'TAN', float),
                         Attribute('comment', 'Comment', text),
-                        Attribute('x_solve', 'XSolve', str),
-                        Attribute('y_solve', 'YSolve', str),
+                        Attribute('x_solve', 'XSolve', str, writable=False),
+                        Attribute('y_solve', 'YSolve', str, writable=False),
                         Attribute('ignore', 'Ignore', bool),
                     ),
+                    'AddField',
+                    ('x', 'y', 'weight'),
+                    'RemoveField',
                 ),
             ),
         ),
@@ -714,12 +928,16 @@ SYSTEM: dict[str, Section | Listing] = {
             'NumberOfWavelengths',
             'GetWavelength',
             (
-                Attribute('number', 'WavelengthNumber', int),
-                Attribute('active', 'IsActive', bool),
+                Attribute('number', 'WavelengthNumber', int, writable=False),
+                Attribute('active', 'IsActive', bool, writable=False),
                 Attribute('wavelength', 'Wavelength', float),
                 Attribute('weight', 'Weight', float),
-                Attribute('primary', 'IsPrimary', bool),
+                Attribute('primary', 'IsPrimary', bool, writable=False),
             ),
+            'AddWavelength',
+            ('wavelength', 'weight'),
+            'RemoveWavelength',
+            'MakePrimary',
         ),
     ),
     'environment': Section(
