@@ -375,7 +375,11 @@ def create_server() -> mcp.server.MCPServer:
             * **surfaces** -- One entry per surface, starting with the object surface at surface 0. Present when ``surface`` is omitted.
             * **surface_number** -- Surface number. 0 is the object surface.
             * **is_stop** -- True when the surface is the stop.
-            * **type** -- Surface type, such as ``Standard``. This value is read-only.
+            * **type** -- Surface type, such as ``Standard`` or ``EvenAspheric``.
+            * **parameters** -- Parameter columns used by ``type``. Empty when the type uses none.
+            * **parameters[].column** -- Column name, such as ``Par1``.
+            * **parameters[].header** -- Column title from the Lens Data Editor. This member is read-only.
+            * **parameters[].value** -- Cell value. A number, or a string when the cell stores text.
             * **comment** -- Surface comment. Empty when the surface has no comment.
             * **radius** -- Radius of curvature, in lens units.
             * **thickness** -- Thickness to the next surface, in lens units.
@@ -398,21 +402,24 @@ def create_server() -> mcp.server.MCPServer:
             '`action` is `change`, `add`, or `remove`. '
             '`number` is the surface number, and `0` is the object surface. '
             '`add` inserts a surface at `number`. '
-            '`values` uses the same fields as one surface returned by `get_lens_data`.'
+            '`values` uses the same fields as one surface returned by `get_lens_data`. '
+            '`type` sets the surface type. '
+            '`parameters` maps column names such as `Par1` to new values. '
+            'When both are set, the type changes first.'
         ),
     )
     def set_lens_rows(
         ctx: mcp.server.mcpserver.Context,
         action: typing.Literal['change', 'add', 'remove'],
         number: int,
-        values: dict[str, str | float | bool | int] | None = None,
+        values: dict[str, str | float | bool | int | dict[str, str | float | int]] | None = None,
     ) -> dict[str, object]:
         """
         Change, insert, or remove one Lens Data Editor surface and return the editor.
 
         :param action: ``change``, ``add``, or ``remove``.
-        :param number: Surface number. 0 is the object surface. ``add`` inserts at this number, and following surfaces move up. The new surface is a ``Standard`` surface.
-        :param values: Keys to write. The fields are the same as those of one surface returned by :meth:`get_lens_data`. Omit ``values`` to insert a default surface or to remove a surface. ``surface_number`` and ``type`` are read-only. Setting ``is_stop`` to true makes that surface the stop. The object and image surfaces cannot be removed.
+        :param number: Surface number. 0 is the object surface. ``add`` inserts at this number, and following surfaces move up. The inserted surface is ``Standard`` until ``values`` sets ``type``.
+        :param values: Keys to write. The fields are the same as those of one surface returned by :meth:`get_lens_data`. Omit ``values`` to insert a default surface or to remove a surface. ``surface_number`` is read-only. ``type`` is a surface type name, such as ``EvenAspheric``. ``parameters`` maps column names such as ``Par1`` to a number or a string; only listed columns are written, and ``header`` is read-only. ``type`` is applied before ``parameters``. Setting ``is_stop`` to true makes that surface the stop. The object and image surfaces cannot be removed.
         :returns: The surfaces after the change.
         :rtype: dict[str, object]
         :raises ValueError: The action, number, or values cannot be applied.

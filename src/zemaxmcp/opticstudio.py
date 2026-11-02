@@ -203,7 +203,7 @@ class OpticStudioSession:
         Return Lens Data Editor surfaces for the lens open in the OpticStudio window.
 
         :param int | None surface: One surface number. ``None`` reads every surface. 0 is the object surface.
-        :returns: Every surface, or the one requested surface.
+        :returns: Every surface, or the one requested surface. Each surface includes the parameter columns its type uses.
         :rtype: dict[str, object]
         :raises ValueError: ``surface`` is outside the editor.
         :raises OpticStudioError: The session is already closed, or OpticStudio cannot answer.
@@ -224,7 +224,7 @@ class OpticStudioSession:
 
         :param str action: ``change``, ``add``, or ``remove``.
         :param int | None number: Surface number. 0 is the object surface.
-        :param dict[str, object] | None values: Keys to write. The fields are the same as those of one surface returned by :meth:`lens_data`.
+        :param dict[str, object] | None values: Keys to write. The fields are the same as those of one surface returned by :meth:`lens_data`. ``type`` changes the surface type first. ``parameters`` maps column names such as ``Par1`` to new values.
         :returns: The surfaces after the change.
         :rtype: dict[str, object]
         :raises ValueError: The action, number, or values cannot be applied.
@@ -1024,10 +1024,145 @@ SYSTEM: dict[str, Section | Listing] = {
 }
 
 
+# Parameter columns from Par0 upward. None until the first read on the ZOS-API thread.
+_PARAMETER_COLUMNS: dict[str, object] | None = None
+
+
+def _parameter_columns() -> dict[str, object]:
+    # Resolved on the ZOS-API thread, where the enumeration is already loaded.
+    global _PARAMETER_COLUMNS
+
+    if _PARAMETER_COLUMNS is not None:
+        return _PARAMETER_COLUMNS
+
+    import clr
+    import System
+    import ZOSAPI
+
+    enum = ZOSAPI.Editors.LDE.SurfaceColumn
+    clr_type = clr.GetClrType(enum)
+    numbered = []
+
+    for name in System.Enum.GetNames(clr_type):
+        label = str(name)
+
+        if not label.startswith('Par'):
+            continue
+
+        member = getattr(enum, label)
+        numbered.append((int(member), label, member))
+
+    numbered.sort()
+    _PARAMETER_COLUMNS = {label: member for _, label, member in numbered}
+
+    return _PARAMETER_COLUMNS
+
+
+def _surface_type_name(value: object) -> str:
+    # ``SurfaceType`` lives on the lens data editor, not on SystemData.
+    if not isinstance(value, str):
+        raise ValueError('type must be a string.')
+
+    import clr
+    import System
+    import ZOSAPI
+
+    enum = ZOSAPI.Editors.LDE.SurfaceType
+    clr_type = clr.GetClrType(enum)
+    names = list(System.Enum.GetNames(clr_type))
+
+    if value not in names:
+        choices = ', '.join(names)
+        raise ValueError(f'type must be one of: {choices}.')
+
+    return value
+
+
+def _active_cells(row) -> dict[str, object]:
+    # Used parameter columns are contiguous. Par0 may be unused while Par1 is used.
+    # When Par0 and Par1 are both unused, this surface type has no parameter columns.
+    active = {}
+    seen = 0
+
+    for name, column in _parameter_columns().items():
+        cell = row.GetSurfaceCell(column)
+        seen += 1
+
+        if bool(cell.IsActive):
+            active[name] = cell
+
+            continue
+
+        if active or seen >= 2:
+            break
+
+    return active
+
+
+def _cell_value(cell) -> object:
+    kind = str(cell.DataType)
+
+    if kind == 'Integer':
+        return int(cell.IntegerValue)
+
+    if kind == 'Double':
+        return float(cell.DoubleValue)
+
+    if kind == 'String':
+        return text(cell.Value)
+
+    raise ValueError(f'Unsupported cell data type {kind}.')
+
+
+def _cell_for_write(cell, key: str, value: object) -> object:
+    kind = str(cell.DataType)
+
+    if kind == 'Integer':
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise ValueError(f'{key} must be an integer.')
+
+        if isinstance(value, float) and not value.is_integer():
+            raise ValueError(f'{key} must be an integer.')
+
+        return int(value)
+
+    if kind == 'Double':
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise ValueError(f'{key} must be a number.')
+
+        return float(value)
+
+    if kind == 'String':
+        if not isinstance(value, str):
+            raise ValueError(f'{key} must be a string.')
+
+        return value
+
+    raise ValueError(f'{key} has unsupported data type {kind}.')
+
+
+def _place_cell(cell, value: object) -> None:
+    kind = str(cell.DataType)
+
+    if kind == 'Integer':
+        cell.IntegerValue = value
+
+        return
+
+    if kind == 'Double':
+        cell.DoubleValue = value
+
+        return
+
+    cell.Value = value
+
+
 @dataclasses.dataclass(frozen=True)
 class LensData:
     """
     Lens Data Editor columns copied for every surface.
+
+    Parameter columns depend on the surface type. :meth:`read` includes the active ones.
 
     :param attributes: Columns read from each surface.
     :type attributes: tuple[Attribute, ...]
@@ -1042,7 +1177,7 @@ class LensData:
 
         :param editor: The ZOS-API lens data editor.
         :param int | None surface: One surface number. ``None`` reads every surface. 0 is the object surface.
-        :returns: ``surfaces``, or the one requested surface. Each surface includes ``is_stop``.
+        :returns: ``surfaces``, or the one requested surface. Each surface includes ``parameters`` for the columns its type uses.
         :rtype: dict[str, object]
         :raises ValueError: ``surface`` is outside the editor.
         """
@@ -1050,13 +1185,13 @@ class LensData:
         if surface is not None:
             index = self._surface_number(editor, surface, inserting=False)
 
-            return Attribute.record(editor.GetSurfaceAt(index), self.attributes)
+            return self._surface(editor.GetSurfaceAt(index))
 
         total = int(editor.NumberOfSurfaces)
         surfaces = []
 
         for index in range(total):
-            surfaces.append(Attribute.record(editor.GetSurfaceAt(index), self.attributes))
+            surfaces.append(self._surface(editor.GetSurfaceAt(index)))
 
         return {
             'surfaces': surfaces,
@@ -1072,7 +1207,7 @@ class LensData:
         """
         Change, insert, or remove one surface.
 
-        ``add`` inserts at ``number`` and then writes ``values``.
+        ``add`` inserts at ``number`` and then writes ``values``. ``type`` changes the surface type before the other keys. ``parameters`` maps column names such as ``Par1`` to new values.
 
         :param editor: The ZOS-API lens data editor.
         :param str action: ``change``, ``add``, or ``remove``.
@@ -1104,23 +1239,21 @@ class LensData:
         if not values:
             raise ValueError('values must contain the keys to change.')
 
+        surface_type, parameters, columns = self._prepare(values)
         index = self._surface_number(editor, number, inserting=False)
-        prepared = self._prepare(values)
         row = editor.GetSurfaceAt(index)
 
-        for attribute, value in prepared:
-            attribute._place(row, value)
+        self._apply(row, surface_type, parameters, columns)
 
     def _add(self, editor, number: int | None, values: dict[str, object]) -> None:
+        surface_type, parameters, columns = self._prepare(values)
         index = self._surface_number(editor, number, inserting=True)
-        prepared = self._prepare(values)
         row = editor.InsertNewSurfaceAt(index)
 
         if row is None:
             raise ValueError(f'Surface {index} could not be inserted.')
 
-        for attribute, value in prepared:
-            attribute._place(row, value)
+        self._apply(row, surface_type, parameters, columns)
 
     def _remove(self, editor, number: int | None, values: dict[str, object]) -> None:
         if values:
@@ -1140,16 +1273,31 @@ class LensData:
         if removed is False:
             raise ValueError(f'Surface {index} could not be removed.')
 
-    def _prepare(self, values: dict[str, object]) -> list[tuple[Attribute, object]]:
+    def _prepare(
+        self,
+        values: dict[str, object],
+    ) -> tuple[str | None, dict[str, object] | None, list[tuple[Attribute, object]]]:
         # Convert every value before changing a surface, so a bad key leaves the editor unchanged.
         by_name = {item.name: item for item in self.attributes}
+        surface_type = None
+        parameters = None
         prepared = []
 
         for key, value in values.items():
+            if key == 'type':
+                surface_type = _surface_type_name(value)
+
+                continue
+
+            if key == 'parameters':
+                parameters = self._parameter_values(value)
+
+                continue
+
             attribute = by_name.get(key)
 
             if attribute is None:
-                allowed = ', '.join(item.name for item in self.attributes if item.writable)
+                allowed = self._writable_names()
                 raise ValueError(f'Unknown setting {key!r}. Expected one of: {allowed}.')
 
             if not attribute.writable:
@@ -1157,7 +1305,110 @@ class LensData:
 
             prepared.append((attribute, attribute.value_for_write(value)))
 
+        return surface_type, parameters, prepared
+
+    def _parameter_values(self, value: object) -> dict[str, object]:
+        if not isinstance(value, dict):
+            raise ValueError('parameters must be a dictionary of column names.')
+
+        if not value:
+            raise ValueError('parameters must contain the columns to change.')
+
+        columns = _parameter_columns()
+        prepared = {}
+
+        for key, item in value.items():
+            if key not in columns:
+                raise ValueError(f'Unknown parameter column {key!r}. Expected a name such as Par1.')
+
+            if isinstance(item, bool) or not isinstance(item, (int, float, str)):
+                raise ValueError(f'{key} must be a number or a string.')
+
+            prepared[key] = item
+
         return prepared
+
+    def _writable_names(self) -> str:
+        names = [item.name for item in self.attributes if item.name == 'type' or item.writable]
+
+        names.append('parameters')
+
+        return ', '.join(names)
+
+    def _apply(
+        self,
+        row,
+        surface_type: str | None,
+        parameters: dict[str, object] | None,
+        columns: list[tuple[Attribute, object]],
+    ) -> None:
+        # The surface type selects which parameter columns exist, so it changes before those columns are checked.
+        if surface_type is not None:
+            self._change_type(row, surface_type)
+
+        converted = [] if parameters is None else self._converted_parameters(row, parameters)
+
+        for attribute, value in columns:
+            attribute._place(row, value)
+
+        for cell, value in converted:
+            _place_cell(cell, value)
+
+    def _change_type(self, row, name: str) -> None:
+        import ZOSAPI
+
+        surface_type = getattr(ZOSAPI.Editors.LDE.SurfaceType, name)
+        settings = row.GetSurfaceTypeSettings(surface_type)
+        changed = row.ChangeType(settings)
+
+        if changed is False:
+            if bool(settings.RequiresFile):
+                raise ValueError(f'Surface type {name} could not be applied. It requires a file.')
+
+            raise ValueError(f'Surface type {name} could not be applied.')
+
+    def _converted_parameters(self, row, parameters: dict[str, object]) -> list[tuple[object, object]]:
+        active = _active_cells(row)
+        converted = []
+
+        for key, value in parameters.items():
+            cell = active.get(key)
+
+            if cell is None:
+                choices = ', '.join(active) if active else 'none'
+                raise ValueError(f'{key} is not used by this surface type. Expected one of: {choices}.')
+
+            if bool(cell.IsReadOnly):
+                raise ValueError(f'{key} is read-only.')
+
+            converted.append((cell, _cell_for_write(cell, key, value)))
+
+        return converted
+
+    def _surface(self, row) -> dict[str, object]:
+        record = Attribute.record(row, self.attributes)
+        parameters = self._parameters(row)
+        ordered = {}
+
+        for key, value in record.items():
+            ordered[key] = value
+
+            if key == 'type':
+                ordered['parameters'] = parameters
+
+        return ordered
+
+    def _parameters(self, row) -> list[dict[str, object]]:
+        parameters = []
+
+        for name, cell in _active_cells(row).items():
+            parameters.append({
+                'column': name,
+                'header': text(cell.Header),
+                'value': _cell_value(cell),
+            })
+
+        return parameters
 
     def _surface_number(self, editor, number: int | None, inserting: bool) -> int:
         if isinstance(number, bool) or not isinstance(number, int):
@@ -1182,6 +1433,7 @@ class LensData:
 LENS = LensData(
     (
         Attribute('surface_number', 'SurfaceNumber', int, writable=False),
+        # Written by _change_type through ChangeType.
         Attribute('type', 'Type', str, writable=False),
         Attribute('comment', 'Comment', text),
         Attribute('radius', 'Radius', float),
