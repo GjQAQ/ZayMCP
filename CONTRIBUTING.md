@@ -1,6 +1,6 @@
 # Contributing
 
-ZemaxMCP is a distributable MCP server for Ansys Zemax OpticStudio 2024 R2. This file describes how to set up a working copy and how to prepare a change.
+ZayMCP is a distributable MCP server for Ansys Zemax OpticStudio 2024 R2. This file describes how to set up a working copy and how to prepare a change.
 
 ## Development environment
 
@@ -19,7 +19,7 @@ The server connects to an OpticStudio window that is already waiting on Interact
 An MCP host launches the server with:
 
 ```bash
-uv run zemaxmcp
+uv run zaymcp
 ```
 
 Check a change by calling the affected tool from a host attached to that session.

@@ -1,6 +1,6 @@
-# ZemaxMCP
+# ZayMCP
 
-ZemaxMCP is a distributable MCP server for Ansys Zemax OpticStudio. The supported release is OpticStudio 2024 R2. Supporting another release is a separate change.
+ZayMCP is a distributable MCP server for Ansys Zemax OpticStudio. The supported release is OpticStudio 2024 R2. Supporting another release is a separate change.
 
 ## Decisions
 
