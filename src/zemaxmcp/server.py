@@ -494,6 +494,25 @@ def create_server() -> mcp.server.MCPServer:
 
     @server.tool(
         description=(
+            'Calculate the merit function for the open lens. '
+            'Returns the merit value and the operands with updated values and contributions.'
+        ),
+    )
+    def calculate_merit_function(ctx: mcp.server.mcpserver.Context) -> dict[str, object]:
+        """
+        Calculate the merit function and return its value and the updated operands.
+
+        :returns:
+            * **merit** -- Merit function value. ``None`` when OpticStudio does not return a finite value.
+            * **operands** -- One entry per operand, in editor order, after the calculation. The fields of each operand are the same as those returned by :meth:`get_merit_function`. ``value`` and ``contribution`` are the calculated numbers.
+        :rtype: dict[str, object]
+        :raises ValueError: The merit function cannot be calculated.
+        """
+
+        return read(ctx, lambda session: session.calculate_merit_function())
+
+    @server.tool(
+        description=(
             'Return effective focal length, entrance pupil diameter, F-numbers, and total length for the open lens. '
             'Lengths are in lens units.'
         ),

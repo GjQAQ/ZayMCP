@@ -281,6 +281,20 @@ class OpticStudioSession:
 
         return self.call(change)
 
+    def calculate_merit_function(self) -> dict[str, object]:
+        """
+        Calculate the merit function and return its value and the operands.
+
+        ``value`` and ``contribution`` on each operand are the numbers from this calculation.
+
+        :returns: ``merit`` and ``operands``. ``merit`` is ``None`` when OpticStudio does not return a finite value. Each operand has the same fields as :meth:`merit_function`.
+        :rtype: dict[str, object]
+        :raises ValueError: The merit function cannot be calculated.
+        :raises OpticStudioError: The session is already closed, or OpticStudio cannot answer.
+        """
+
+        return self.call(lambda: _calculate_merit(self._system.MFE))
+
     def first_order(self) -> dict[str, float | str | None]:
         """
         Return first-order values for the lens open in the OpticStudio window.
@@ -1924,6 +1938,24 @@ MERIT = MeritFunction(
         Attribute('contribution', 'Contribution', float, writable=False),
     ),
 )
+
+
+def _calculate_merit(editor) -> dict[str, object]:
+    # Calculate before reading so value and contribution are the new results.
+    try:
+        raw = editor.CalculateMeritFunction()
+    except OpticStudioError:
+        raise
+    except Exception as exc:
+        raise ValueError(f'The merit function could not be calculated. {exc}') from exc
+
+    number = float(raw)
+    operands = MERIT.read(editor)
+
+    return {
+        'merit': number if math.isfinite(number) else None,
+        'operands': operands['operands'],
+    }
 
 
 # Name, operand, and the two integer arguments. Wave 0 selects the primary wavelength.
