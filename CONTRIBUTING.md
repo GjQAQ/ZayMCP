@@ -30,6 +30,8 @@ Lasting choices are recorded in [docs/adr](docs/adr). Read the accepted records 
 
 ## Source
 
+A feature uses the same path under `tools` and `zosapi`. The path follows the ribbon group, and the leaf is the window, dialog, or analysis the user opens. The connection and the STA thread stay in `zosapi/session.py`. The shared read and write model used by the editors stays in `zosapi/model`. A leaf tool module imports the module-level server and decorates it.
+
 Write [Sphinx-style](https://www.sphinx-doc.org/en/master/usage/restructuredtext/domains.html#info-field-lists) docstrings for public classes, functions, and methods. Document public fields and module-level variables with a `#:` comment and a Python type hint. Document `__init__` parameters on the class. Dunder methods do not get docstrings.
 
 Pass an MCP tool description as the `description` argument of `@server.tool()`. Use one sentence, or one paragraph when the tool is complex, and use Markdown when that description needs formatting. The docstring still documents inputs and outputs; it is not the description sent to the host.
