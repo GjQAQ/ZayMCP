@@ -12,6 +12,11 @@ import pydantic
 
 import zemaxmcp.opticstudio
 
+# A cell solve is an object inside a column value, which is itself inside `values`.
+_SolveValue = str | float | int | dict[str, str | float | int]
+_CellValue = str | float | int | dict[str, _SolveValue]
+_EditorValues = dict[str, str | float | bool | int | dict[str, _CellValue]]
+
 __all__ = [
     'SERVER_NAME',
     'create_server',
@@ -504,8 +509,20 @@ def create_server() -> mcp.server.MCPServer:
             * **parameters[].column** -- Column name, such as ``Par1``.
             * **parameters[].header** -- Column title from the Lens Data Editor. This member is read-only.
             * **parameters[].value** -- Cell value. A number, or a string when the cell stores text.
+            * **parameters[].solve** -- Solve on that parameter cell. The same object as ``radius_solve``.
             * **comment** -- Surface comment. Empty when the surface has no comment.
             * **radius** -- Radius of curvature, in lens units.
+            * **radius_solve** -- Solve on the radius cell. ``thickness_solve``, ``material_solve``, ``coating_solve``, ``semi_diameter_solve``, ``chip_zone_solve``, ``mechanical_semi_diameter_solve``, ``conic_solve``, and ``tce_solve`` use the same object.
+            * **radius_solve.type** -- ``Variable``, ``Fixed``, ``SurfacePickup``, ``FNumber``, ``Position``, ``ConfigPickup``, or ``ThermalPickup``. A type this cell does not support is rejected.
+            * **radius_solve.f_number** -- F-number. Present when ``type`` is ``FNumber``.
+            * **radius_solve.from_surface** -- Surface the position is measured from. Present when ``type`` is ``Position``. 0 is the object surface.
+            * **radius_solve.length** -- Distance from ``from_surface``, in lens units.
+            * **radius_solve.surface** -- Surface a pickup reads. Present when ``type`` is ``SurfacePickup``.
+            * **radius_solve.scale** -- Pickup scale. Present when that pickup uses a scale.
+            * **radius_solve.offset** -- Pickup offset. Present when that pickup uses an offset.
+            * **radius_solve.column** -- Lens Data column a surface pickup reads, such as ``Thickness`` or ``Par1``. Omitted when the pickup uses the same column.
+            * **radius_solve.operand** -- Operand a configuration pickup reads. Present when ``type`` is ``ConfigPickup``.
+            * **radius_solve.configuration** -- Configuration a pickup reads. Present for ``ConfigPickup`` and ``ThermalPickup``.
             * **thickness** -- Thickness to the next surface, in lens units.
             * **material** -- Glass name. Empty when the surface is air.
             * **coating** -- Coating name. Empty when the surface has no coating.
@@ -528,22 +545,23 @@ def create_server() -> mcp.server.MCPServer:
             '`add` inserts a surface at `number`. '
             '`values` uses the same fields as one surface returned by `get_lens_data`. '
             '`type` sets the surface type. '
-            '`parameters` maps column names such as `Par1` to new values. '
-            'When both are set, the type changes first.'
+            '`parameters` maps column names such as `Par1` to a value, or to an object with `value` and `solve`. '
+            '`radius_solve` and the other cell solves use the same solve object. '
+            'When type and parameters are both set, the type changes first.'
         ),
     )
     def set_lens_rows(
         ctx: mcp.server.mcpserver.Context,
         action: typing.Literal['change', 'add', 'remove'],
         number: int,
-        values: dict[str, str | float | bool | int | dict[str, str | float | int]] | None = None,
+        values: _EditorValues | None = None,
     ) -> dict[str, object]:
         """
         Change, insert, or remove one Lens Data Editor surface and return the editor.
 
         :param action: ``change``, ``add``, or ``remove``.
         :param number: Surface number. 0 is the object surface. ``add`` inserts at this number, and following surfaces move up. The inserted surface is ``Standard`` until ``values`` sets ``type``.
-        :param values: Keys to write. The fields are the same as those of one surface returned by :meth:`get_lens_data`. Omit ``values`` to insert a default surface or to remove a surface. ``surface_number`` is read-only. ``type`` is a surface type name, such as ``EvenAspheric``. ``parameters`` maps column names such as ``Par1`` to a number or a string; only listed columns are written, and ``header`` is read-only. ``type`` is applied before ``parameters``. Setting ``is_stop`` to true makes that surface the stop. The object and image surfaces cannot be removed.
+        :param values: Keys to write. The fields are the same as those of one surface returned by :meth:`get_lens_data`. Omit ``values`` to insert a default surface or to remove a surface. ``surface_number`` is read-only. ``type`` is a surface type name, such as ``EvenAspheric``. ``parameters`` maps column names such as ``Par1`` to a number, a string, or an object with ``value`` and ``solve``. ``header`` is read-only. ``type`` is applied before ``parameters``. ``radius_solve`` and the other cell solves set that cell's solve; ``Fixed`` clears it. Omit ``column`` on a surface pickup to use the same column. Setting ``is_stop`` to true makes that surface the stop. The object and image surfaces cannot be removed.
         :returns: The surfaces after the change.
         :rtype: dict[str, object]
         :raises ValueError: The action, number, or values cannot be applied.
@@ -644,6 +662,7 @@ def create_server() -> mcp.server.MCPServer:
             * **cells** -- One entry per configuration column.
             * **cells[].configuration** -- Configuration number.
             * **cells[].value** -- Cell value. A number, or a string when the cell stores text, such as a glass name.
+            * **cells[].solve** -- Solve on that configuration cell. The same object as ``radius_solve`` returned by :meth:`get_lens_data`.
         :rtype: dict[str, object]
         :raises ValueError: ``operand`` is outside the editor.
         """
@@ -657,6 +676,7 @@ def create_server() -> mcp.server.MCPServer:
             '`action` is `change`, `add`, `remove`, or `make_current`. '
             '`make_current` selects the configuration shown in the Lens Data Editor. '
             '`values` uses the same fields as one operand returned by `get_multi_configuration`. '
+            'A cell may be a value, or an object with `value` and `solve`. '
             '`type` sets the operand type before parameters and configuration cells.'
         ),
     )
@@ -665,7 +685,7 @@ def create_server() -> mcp.server.MCPServer:
         section: typing.Literal['operand', 'configuration'],
         action: typing.Literal['change', 'add', 'remove', 'make_current'],
         number: int,
-        values: dict[str, str | float | bool | int | dict[str, str | float | int]] | None = None,
+        values: _EditorValues | None = None,
     ) -> dict[str, object]:
         """
         Change one Multi-Configuration Editor operand or configuration and return the editor.
@@ -673,7 +693,7 @@ def create_server() -> mcp.server.MCPServer:
         :param section: ``operand`` or ``configuration``.
         :param action: ``change``, ``add``, ``remove``, or ``make_current``. ``make_current`` selects the configuration shown in the Lens Data Editor.
         :param number: 1-based operand or configuration number. ``add`` inserts at this number, and following rows or columns move up. Pass ``number`` one past the last entry to append.
-        :param values: Keys to write. For an operand, the fields are the same as those of one operand returned by :meth:`get_multi_configuration`. Omit ``values`` to insert a default operand or configuration, or to remove one. ``number`` and ``active`` are read-only. ``type`` is an operand type name, such as ``THIC``. ``parameters`` maps ``Param1``, ``Param2``, or ``Param3`` to an integer. ``cells`` maps a configuration number, such as ``"1"``, to a number or a string. ``type`` is applied before ``parameters`` and ``cells``. A configuration has no fields to change. ``add`` for a configuration accepts ``copy``: true copies the current configuration's cells. The last configuration cannot be removed.
+        :param values: Keys to write. For an operand, the fields are the same as those of one operand returned by :meth:`get_multi_configuration`. Omit ``values`` to insert a default operand or configuration, or to remove one. ``number`` and ``active`` are read-only. ``type`` is an operand type name, such as ``THIC``. ``parameters`` maps ``Param1``, ``Param2``, or ``Param3`` to an integer. ``cells`` maps a configuration number, such as ``"1"``, to a number, a string, or an object with ``value`` and ``solve``. ``type`` is applied before ``parameters`` and ``cells``. A configuration has no fields to change. ``add`` for a configuration accepts ``copy``: true copies the current configuration's cells. The last configuration cannot be removed.
         :returns: ``current``, ``configurations``, and ``operands`` after the change.
         :rtype: dict[str, object]
         :raises ValueError: The section, action, number, or values cannot be applied.

@@ -226,7 +226,7 @@ class OpticStudioSession:
 
         :param str action: ``change``, ``add``, or ``remove``.
         :param int | None number: Surface number. 0 is the object surface.
-        :param dict[str, object] | None values: Keys to write. The fields are the same as those of one surface returned by :meth:`lens_data`. ``type`` changes the surface type first. ``parameters`` maps column names such as ``Par1`` to new values.
+        :param dict[str, object] | None values: Keys to write. The fields are the same as those of one surface returned by :meth:`lens_data`. ``type`` changes the surface type first. ``parameters`` maps column names such as ``Par1`` to a value or to ``value`` and ``solve``. ``radius_solve`` and the other cell solves set that cell's solve.
         :returns: The surfaces after the change.
         :rtype: dict[str, object]
         :raises ValueError: The action, number, or values cannot be applied.
@@ -310,7 +310,7 @@ class OpticStudioSession:
         :param str section: ``operand`` or ``configuration``.
         :param str action: ``change``, ``add``, ``remove``, or ``make_current``.
         :param int | None number: 1-based operand or configuration number.
-        :param dict[str, object] | None values: Keys to write. For an operand, the fields are the same as those of one operand returned by :meth:`multi_configuration`. ``type`` changes the operand type first. ``parameters`` maps ``Param1``, ``Param2``, or ``Param3`` to an integer. ``cells`` maps a configuration number to a number or a string. For a new configuration, ``copy`` copies the current configuration's cells.
+        :param dict[str, object] | None values: Keys to write. For an operand, the fields are the same as those of one operand returned by :meth:`multi_configuration`. ``type`` changes the operand type first. ``parameters`` maps ``Param1``, ``Param2``, or ``Param3`` to an integer. ``cells`` maps a configuration number to a value or to ``value`` and ``solve``. For a new configuration, ``copy`` copies the current configuration's cells.
         :returns: The editor after the change.
         :rtype: dict[str, object]
         :raises ValueError: The section, action, number, or values cannot be applied.
@@ -1333,6 +1333,266 @@ def _place_cell(cell, value: object) -> None:
     cell.Value = value
 
 
+#: Missing cell value. Distinct from a stored number.
+_UNSET: object = object()
+
+#: Solve types that can be read and written, in the order shown to a caller.
+_SOLVE_TYPES: tuple[str, ...] = (
+    'Variable',
+    'Fixed',
+    'SurfacePickup',
+    'FNumber',
+    'Position',
+    'ConfigPickup',
+    'ThermalPickup',
+)
+
+
+@dataclasses.dataclass(frozen=True)
+class _SolveField:
+    """One parameter of a solve type."""
+
+    #: Key in the solve object.
+    name: str
+    #: Property on the ZOS-API solve data.
+    source: str
+    #: ``int``, ``float``, or ``column``.
+    kind: str
+    #: Property that must be true before this field is used. Empty when the field is always used.
+    capability: str = ''
+    #: When false, the field may be omitted.
+    required: bool = True
+
+
+#: Parameters of each supported solve, in the order they are returned.
+_SOLVE_FIELDS: dict[str, tuple[_SolveField, ...]] = {
+    'Variable': (),
+    'Fixed': (),
+    'SurfacePickup': (
+        _SolveField('surface', 'Surface', 'int'),
+        _SolveField('scale', 'ScaleFactor', 'float', 'SupportsScale'),
+        _SolveField('offset', 'Offset', 'float', 'SupportsOffset'),
+        _SolveField('column', 'Column', 'column', required=False),
+    ),
+    'FNumber': (
+        _SolveField('f_number', 'FNumber', 'float'),
+    ),
+    'Position': (
+        _SolveField('from_surface', 'FromSurface', 'int'),
+        _SolveField('length', 'Length', 'float'),
+    ),
+    'ConfigPickup': (
+        _SolveField('operand', 'Operand', 'int'),
+        _SolveField('configuration', 'Configuration', 'int'),
+        _SolveField('scale', 'ScaleFactor', 'float', 'SupportsScale'),
+        _SolveField('offset', 'Offset', 'float', 'SupportsOffset'),
+    ),
+    'ThermalPickup': (
+        _SolveField('configuration', 'Configuration', 'int'),
+    ),
+}
+
+#: Lens Data columns that expose a solve, and the cell property that holds it.
+_LENS_SOLVE_COLUMNS: dict[str, str] = {
+    'radius': 'RadiusCell',
+    'thickness': 'ThicknessCell',
+    'material': 'MaterialCell',
+    'coating': 'CoatingCell',
+    'semi_diameter': 'SemiDiameterCell',
+    'chip_zone': 'ChipZoneCell',
+    'mechanical_semi_diameter': 'MechanicalSemiDiameterCell',
+    'conic': 'ConicCell',
+    'tce': 'TCECell',
+}
+
+
+def _read_solve(cell) -> dict[str, object]:
+    kind = str(cell.Solve)
+    fields = _SOLVE_FIELDS.get(kind)
+
+    if not fields:
+        return {'type': kind}
+
+    data = cell.GetSolveData()
+
+    if data is None:
+        return {'type': kind}
+
+    body = getattr(data, '_S_' + kind)
+    result: dict[str, object] = {'type': kind}
+
+    for field in fields:
+        if field.capability and not bool(getattr(body, field.capability)):
+            continue
+
+        if field.name == 'column' and bool(body.IsPickupFromCurrentColumn()):
+            continue
+
+        raw = getattr(body, field.source)
+
+        if field.kind == 'int':
+            result[field.name] = int(raw)
+        elif field.kind == 'float':
+            result[field.name] = float(raw)
+        else:
+            result[field.name] = str(raw)
+
+    return result
+
+
+def _solve_request(value: object) -> dict[str, object]:
+    if not isinstance(value, dict):
+        raise ValueError('solve must be an object with a type.')
+
+    kind = value.get('type')
+    fields = _SOLVE_FIELDS.get(kind) if isinstance(kind, str) else None
+
+    if fields is None:
+        choices = ', '.join(_SOLVE_TYPES)
+        raise ValueError(f'solve.type must be one of: {choices}.')
+
+    allowed = {field.name: field for field in fields}
+    prepared: dict[str, object] = {'type': kind}
+
+    for key, item in value.items():
+        if key == 'type':
+            continue
+
+        field = allowed.get(key)
+
+        if field is None:
+            names = ', '.join(('type', *(field.name for field in fields)))
+            raise ValueError(f'Unknown solve field {key!r}. Expected one of: {names}.')
+
+        prepared[key] = _solve_field_value(field, item)
+
+    for field in fields:
+        if field.required and not field.capability and field.name not in prepared:
+            raise ValueError(f'{field.name} is required for {kind}.')
+
+    return prepared
+
+
+def _solve_field_value(field: _SolveField, value: object) -> object:
+    if field.kind == 'column':
+        if not isinstance(value, str):
+            raise ValueError('column must be a string.')
+
+        return value
+
+    if field.kind == 'int':
+        return _whole_number(field.name, value)
+
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(f'{field.name} must be a number.')
+
+    return float(value)
+
+
+def _apply_solve(cell, request: dict[str, object]) -> None:
+    import ZOSAPI
+
+    kind = str(request['type'])
+    enum = getattr(ZOSAPI.Editors.SolveType, kind)
+
+    if cell.IsSolveTypeSupported(enum) is False:
+        choices = cell.GetAvailableSolveTypes()
+        available = ', '.join(str(item) for item in choices) if choices else ''
+        message = f'{kind} is not available for this cell.'
+
+        if available:
+            message = f'{message} Expected one of: {available}.'
+
+        raise ValueError(message)
+
+    if kind == 'Variable':
+        if cell.MakeSolveVariable() is False:
+            raise ValueError('Variable solve could not be applied.')
+
+        return
+
+    if kind == 'Fixed':
+        if cell.MakeSolveFixed() is False:
+            raise ValueError('Fixed solve could not be applied.')
+
+        return
+
+    data = cell.CreateSolveType(enum)
+    _fill_solve(data, request)
+    status = cell.SetSolveData(data)
+
+    if str(status) != 'Success':
+        raise ValueError(f'The solve could not be applied. {status}')
+
+
+def _fill_solve(data, request: dict[str, object]) -> None:
+    kind = str(request['type'])
+    body = getattr(data, '_S_' + kind)
+
+    for field in _SOLVE_FIELDS[kind]:
+        if field.name not in request:
+            if field.name == 'column':
+                body.MakePickupFromCurrentColumn()
+
+            continue
+
+        if field.capability and not bool(getattr(body, field.capability)):
+            raise ValueError(f'{field.name} is not used by this {kind} solve.')
+
+        if field.kind == 'column':
+            body.Column = _surface_column(request[field.name])
+
+            continue
+
+        setattr(body, field.source, request[field.name])
+
+    for field in _SOLVE_FIELDS[kind]:
+        if field.capability and field.name not in request and bool(getattr(body, field.capability)):
+            raise ValueError(f'{field.name} is required for {kind}.')
+
+
+def _surface_column(name: object):
+    if not isinstance(name, str):
+        raise ValueError('column must be a string.')
+
+    import clr
+    import System
+    import ZOSAPI
+
+    enum = ZOSAPI.Editors.LDE.SurfaceColumn
+    clr_type = clr.GetClrType(enum)
+
+    if not System.Enum.IsDefined(clr_type, name):
+        raise ValueError(f'Unknown column {name!r}.')
+
+    return getattr(enum, name)
+
+
+def _cell_write(label: str, value: object) -> tuple[object, dict[str, object] | None]:
+    if not isinstance(value, dict):
+        if isinstance(value, bool) or not isinstance(value, (int, float, str)):
+            raise ValueError(f'{label} must be a number or a string.')
+
+        return value, None
+
+    if not value or not set(value) <= {'value', 'solve'}:
+        raise ValueError(f'{label} accepts value, solve, or both.')
+
+    cell_value = _UNSET
+
+    if 'value' in value:
+        item = value['value']
+
+        if isinstance(item, bool) or not isinstance(item, (int, float, str)):
+            raise ValueError(f'{label} value must be a number or a string.')
+
+        cell_value = item
+
+    solve = _solve_request(value['solve']) if 'solve' in value else None
+
+    return cell_value, solve
+
+
 @dataclasses.dataclass(frozen=True)
 class LensData:
     """
@@ -1415,21 +1675,21 @@ class LensData:
         if not values:
             raise ValueError('values must contain the keys to change.')
 
-        surface_type, parameters, columns = self._prepare(values)
+        surface_type, parameters, solves, columns = self._prepare(values)
         index = self._surface_number(editor, number, inserting=False)
         row = editor.GetSurfaceAt(index)
 
-        self._apply(row, surface_type, parameters, columns)
+        self._apply(row, surface_type, parameters, solves, columns)
 
     def _add(self, editor, number: int | None, values: dict[str, object]) -> None:
-        surface_type, parameters, columns = self._prepare(values)
+        surface_type, parameters, solves, columns = self._prepare(values)
         index = self._surface_number(editor, number, inserting=True)
         row = editor.InsertNewSurfaceAt(index)
 
         if row is None:
             raise ValueError(f'Surface {index} could not be inserted.')
 
-        self._apply(row, surface_type, parameters, columns)
+        self._apply(row, surface_type, parameters, solves, columns)
 
     def _remove(self, editor, number: int | None, values: dict[str, object]) -> None:
         if values:
@@ -1452,11 +1712,17 @@ class LensData:
     def _prepare(
         self,
         values: dict[str, object],
-    ) -> tuple[str | None, dict[str, object] | None, list[tuple[Attribute, object]]]:
+    ) -> tuple[
+        str | None,
+        dict[str, tuple[object, dict[str, object] | None]] | None,
+        dict[str, dict[str, object]],
+        list[tuple[Attribute, object]],
+    ]:
         # Convert every value before changing a surface, so a bad key leaves the editor unchanged.
         by_name = {item.name: item for item in self.attributes}
         surface_type = None
         parameters = None
+        solves = {}
         prepared = []
 
         for key, value in values.items():
@@ -1467,6 +1733,11 @@ class LensData:
 
             if key == 'parameters':
                 parameters = self._parameter_values(value)
+
+                continue
+
+            if key.endswith('_solve') and key[: -len('_solve')] in _LENS_SOLVE_COLUMNS:
+                solves[key[: -len('_solve')]] = _solve_request(value)
 
                 continue
 
@@ -1481,9 +1752,9 @@ class LensData:
 
             prepared.append((attribute, attribute.value_for_write(value)))
 
-        return surface_type, parameters, prepared
+        return surface_type, parameters, solves, prepared
 
-    def _parameter_values(self, value: object) -> dict[str, object]:
+    def _parameter_values(self, value: object) -> dict[str, tuple[object, dict[str, object] | None]]:
         if not isinstance(value, dict):
             raise ValueError('parameters must be a dictionary of column names.')
 
@@ -1497,10 +1768,7 @@ class LensData:
             if key not in columns:
                 raise ValueError(f'Unknown parameter column {key!r}. Expected a name such as Par1.')
 
-            if isinstance(item, bool) or not isinstance(item, (int, float, str)):
-                raise ValueError(f'{key} must be a number or a string.')
-
-            prepared[key] = item
+            prepared[key] = _cell_write(key, item)
 
         return prepared
 
@@ -1508,6 +1776,7 @@ class LensData:
         names = [item.name for item in self.attributes if item.name == 'type' or item.writable]
 
         names.append('parameters')
+        names.extend(f'{name}_solve' for name in _LENS_SOLVE_COLUMNS)
 
         return ', '.join(names)
 
@@ -1515,7 +1784,8 @@ class LensData:
         self,
         row,
         surface_type: str | None,
-        parameters: dict[str, object] | None,
+        parameters: dict[str, tuple[object, dict[str, object] | None]] | None,
+        solves: dict[str, dict[str, object]],
         columns: list[tuple[Attribute, object]],
     ) -> None:
         # The surface type selects which parameter columns exist, so it changes before those columns are checked.
@@ -1527,8 +1797,15 @@ class LensData:
         for attribute, value in columns:
             attribute._place(row, value)
 
-        for cell, value in converted:
-            _place_cell(cell, value)
+        for cell, value, solve in converted:
+            if value is not _UNSET:
+                _place_cell(cell, value)
+
+            if solve is not None:
+                _apply_solve(cell, solve)
+
+        for name, request in solves.items():
+            _apply_solve(getattr(row, _LENS_SOLVE_COLUMNS[name]), request)
 
     def _change_type(self, row, name: str) -> None:
         import ZOSAPI
@@ -1543,21 +1820,26 @@ class LensData:
 
             raise ValueError(f'Surface type {name} could not be applied.')
 
-    def _converted_parameters(self, row, parameters: dict[str, object]) -> list[tuple[object, object]]:
+    def _converted_parameters(
+        self,
+        row,
+        parameters: dict[str, tuple[object, dict[str, object] | None]],
+    ) -> list[tuple[object, object, dict[str, object] | None]]:
         active = _active_cells(row)
         converted = []
 
-        for key, value in parameters.items():
+        for key, (value, solve) in parameters.items():
             cell = active.get(key)
 
             if cell is None:
                 choices = ', '.join(active) if active else 'none'
                 raise ValueError(f'{key} is not used by this surface type. Expected one of: {choices}.')
 
-            if bool(cell.IsReadOnly):
+            if value is not _UNSET and bool(cell.IsReadOnly):
                 raise ValueError(f'{key} is read-only.')
 
-            converted.append((cell, _cell_for_write(cell, key, value)))
+            stored = _UNSET if value is _UNSET else _cell_for_write(cell, key, value)
+            converted.append((cell, stored, solve))
 
         return converted
 
@@ -1568,6 +1850,9 @@ class LensData:
 
         for key, value in record.items():
             ordered[key] = value
+
+            if key in _LENS_SOLVE_COLUMNS:
+                ordered[f'{key}_solve'] = _read_solve(getattr(row, _LENS_SOLVE_COLUMNS[key]))
 
             if key == 'type':
                 ordered['parameters'] = parameters
@@ -1582,6 +1867,7 @@ class LensData:
                 'column': name,
                 'header': text(cell.Header),
                 'value': _cell_value(cell),
+                'solve': _read_solve(cell),
             })
 
         return parameters
@@ -2110,6 +2396,7 @@ class MultiConfiguration:
             cells.append({
                 'configuration': number,
                 'value': _cell_value(cell),
+                'solve': _read_solve(cell),
             })
 
         return cells
@@ -2222,7 +2509,7 @@ class MultiConfiguration:
     def _prepare(
         self,
         values: dict[str, object],
-    ) -> tuple[str | None, dict[str, int] | None, dict[int, object] | None]:
+    ) -> tuple[str | None, dict[str, int] | None, dict[int, tuple[object, dict[str, object] | None]] | None]:
         if not isinstance(values, dict):
             raise ValueError('values must be the operand fields to change.')
 
@@ -2259,7 +2546,7 @@ class MultiConfiguration:
         row,
         operand_type: str | None,
         parameters: dict[str, int] | None,
-        cells: dict[int, object] | None,
+        cells: dict[int, tuple[object, dict[str, object] | None]] | None,
     ) -> None:
         # The operand type selects which parameters and cell types exist, so it changes first.
         if operand_type is not None:
@@ -2271,8 +2558,12 @@ class MultiConfiguration:
         for name, value in converted_parameters:
             setattr(row, name, value)
 
-        for cell, value in converted_cells:
-            _place_cell(cell, value)
+        for cell, value, solve in converted_cells:
+            if value is not _UNSET:
+                _place_cell(cell, value)
+
+            if solve is not None:
+                _apply_solve(cell, solve)
 
     def _change_type(self, row, name: str) -> None:
         import ZOSAPI
@@ -2296,7 +2587,7 @@ class MultiConfiguration:
 
         return prepared
 
-    def _cell_values(self, value: object) -> dict[int, object]:
+    def _cell_values(self, value: object) -> dict[int, tuple[object, dict[str, object] | None]]:
         if not isinstance(value, dict) or not value:
             raise ValueError('cells must contain the configurations to change.')
 
@@ -2304,11 +2595,7 @@ class MultiConfiguration:
 
         for key, item in value.items():
             number = _configuration_key(key)
-
-            if isinstance(item, bool) or not isinstance(item, (int, float, str)):
-                raise ValueError(f'Configuration {number} must be a number or a string.')
-
-            prepared[number] = item
+            prepared[number] = _cell_write(f'Configuration {number}', item)
 
         return prepared
 
@@ -2327,21 +2614,22 @@ class MultiConfiguration:
         self,
         editor,
         row,
-        cells: dict[int, object],
-    ) -> list[tuple[object, object]]:
+        cells: dict[int, tuple[object, dict[str, object] | None]],
+    ) -> list[tuple[object, object, dict[str, object] | None]]:
         numbers = set(_configuration_numbers(editor))
         converted = []
 
-        for number, value in cells.items():
+        for number, (value, solve) in cells.items():
             if number not in numbers:
                 raise ValueError(f'Configuration {number} is not in the editor.')
 
             cell = row.GetOperandCell(number)
 
-            if bool(cell.IsReadOnly):
+            if value is not _UNSET and bool(cell.IsReadOnly):
                 raise ValueError(f'Configuration {number} is read-only.')
 
-            converted.append((cell, _cell_for_write(cell, f'Configuration {number}', value)))
+            stored = _UNSET if value is _UNSET else _cell_for_write(cell, f'Configuration {number}', value)
+            converted.append((cell, stored, solve))
 
         return converted
 
