@@ -516,6 +516,30 @@ def create_server() -> mcp.server.MCPServer:
 
         return read(ctx, lambda session: session.first_order())
 
+    @server.tool(
+        description=(
+            'Save the open lens. Omit `path` to save the current file. '
+            'Pass a full `path` to save it as a new file. '
+            'An existing file at that path is replaced.'
+        ),
+    )
+    def save_lens(
+        ctx: mcp.server.mcpserver.Context,
+        path: str | None = None,
+    ) -> dict[str, str | bool]:
+        """
+        Save the lens open in the OpticStudio window and return its identity.
+
+        Omit ``path`` to save the current file. Pass a full path to save the lens as a new file. The window then uses that file. An existing file at that path is replaced. A lens that has never been saved needs a path.
+
+        :param path: Full path of the new lens file, such as a ``.zmx`` or ``.zos`` file. ``None`` saves the current file.
+        :returns: The lens identity after the save. The fields are the same as those returned by :meth:`get_lens_metadata`.
+        :rtype: dict[str, str | bool]
+        :raises ValueError: The lens has no current file, ``path`` is not a full path, or OpticStudio cannot save.
+        """
+
+        return read(ctx, lambda session: session.save(path))
+
     return server
 
 

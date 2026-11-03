@@ -294,6 +294,26 @@ class OpticStudioSession:
 
         return self.call(lambda: _read_first_order(self._system))
 
+    def save(self, path: str | None = None) -> dict[str, str | bool]:
+        """
+        Save the lens open in the OpticStudio window.
+
+        Omit ``path`` to save the current file. Pass a full path to save the lens as a new file. An existing file at that path is replaced. A lens that has never been saved needs a path.
+
+        :param str | None path: Full path of the new lens file. ``None`` saves the current file.
+        :returns: The lens identity after the save. The fields are the same as those returned by :meth:`lens_file`.
+        :rtype: dict[str, str | bool]
+        :raises ValueError: The lens has no current file, ``path`` is not a full path, or OpticStudio cannot save.
+        :raises OpticStudioError: The session is already closed, or OpticStudio cannot answer.
+        """
+
+        def write():
+            _save_lens(self._system, path)
+
+            return self._read_lens_file()
+
+        return self.call(write)
+
     def call(self, function):
         """
         Run a function on the ZOS-API thread and return its result.
@@ -1935,6 +1955,43 @@ def _read_first_order(system) -> dict[str, float | str | None]:
     values['status'] = status
 
     return values
+
+
+def _save_path(path: str) -> str:
+    if not isinstance(path, str):
+        raise ValueError('path must be a full file path.')
+
+    filename = path.strip()
+
+    if not filename or not os.path.isabs(filename):
+        raise ValueError('path must be a full file path.')
+
+    return filename
+
+
+def _save_lens(system, path: str | None) -> None:
+    # A failed save leaves the Interactive Extension session open, so this raises ValueError.
+    if path is None:
+        if text(system.SystemFile) == '':
+            raise ValueError('The lens has not been saved. Pass path to save it as a new file.')
+
+        try:
+            system.Save()
+        except OpticStudioError:
+            raise
+        except Exception as exc:
+            raise ValueError(f'The lens could not be saved. {exc}') from exc
+
+        return
+
+    filename = _save_path(path)
+
+    try:
+        system.SaveAs(filename)
+    except OpticStudioError:
+        raise
+    except Exception as exc:
+        raise ValueError(f'The lens could not be saved. {exc}') from exc
 
 
 def _initialize_sta():
