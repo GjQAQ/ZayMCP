@@ -127,6 +127,7 @@ def main() -> None:
 
 
 # Importing a tool module registers its tools on server.
+import zaymcp.tools.file.lens.new
 import zaymcp.tools.file.lens.save
 import zaymcp.tools.setup.system.explorer
 import zaymcp.tools.setup.editors.lens_data

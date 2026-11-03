@@ -16,6 +16,7 @@ import winreg
 from zaymcp.zosapi.analyze.image_quality.rays_and_spots.single_ray_trace import _single_ray_trace
 from zaymcp.zosapi.analyze.others import _read_first_order
 from zaymcp.zosapi.errors import OpticStudioError
+from zaymcp.zosapi.file.lens.new import _new_lens
 from zaymcp.zosapi.file.lens.save import _save_lens
 from zaymcp.zosapi.model.fields import text
 from zaymcp.zosapi.optimize.automatic_optimization.merit_function import MERIT, _calculate_merit
@@ -396,6 +397,26 @@ class OpticStudioSession:
         """
 
         return self.call(lambda: _read_first_order(self._system))
+
+    def new_lens(self, discard_changes: bool = False) -> dict[str, str | bool]:
+        """
+        Replace the lens open in the OpticStudio window with a new lens.
+
+        Unsaved changes are discarded only when ``discard_changes`` is true. A lens with unsaved changes is left open otherwise. The new lens has not been saved.
+
+        :param bool discard_changes: True discards unsaved changes. False refuses when the lens needs to be saved.
+        :returns: The lens identity after the new lens is created. The fields are the same as those returned by :meth:`lens_file`.
+        :rtype: dict[str, str | bool]
+        :raises ValueError: The lens has unsaved changes and ``discard_changes`` is false, or OpticStudio cannot create the lens.
+        :raises OpticStudioError: The session is already closed, or OpticStudio cannot answer.
+        """
+
+        def write():
+            _new_lens(self._system, discard_changes)
+
+            return self._read_lens_file()
+
+        return self.call(write)
 
     def save(self, path: str | None = None) -> dict[str, str | bool]:
         """
