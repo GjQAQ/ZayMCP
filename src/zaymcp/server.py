@@ -132,6 +132,7 @@ import zaymcp.tools.file.lens.save
 import zaymcp.tools.setup.system.explorer
 import zaymcp.tools.setup.editors.lens_data
 import zaymcp.tools.setup.editors.multi_configuration
+import zaymcp.tools.optimize.automatic_optimization.local_optimization
 import zaymcp.tools.optimize.automatic_optimization.merit_function
 import zaymcp.tools.optimize.automatic_optimization.optimization_wizard
 import zaymcp.tools.analyze.image_quality.rays_and_spots.single_ray_trace

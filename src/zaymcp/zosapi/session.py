@@ -19,6 +19,7 @@ from zaymcp.zosapi.errors import OpticStudioError
 from zaymcp.zosapi.file.lens.new import _new_lens
 from zaymcp.zosapi.file.lens.save import _save_lens
 from zaymcp.zosapi.model.fields import text
+from zaymcp.zosapi.optimize.automatic_optimization.local_optimization import _run_local_optimization
 from zaymcp.zosapi.optimize.automatic_optimization.merit_function import MERIT, _calculate_merit
 from zaymcp.zosapi.optimize.automatic_optimization.optimization_wizard import _apply_optimization_wizard
 from zaymcp.zosapi.setup.editors.lens_data import LENS
@@ -356,6 +357,26 @@ class OpticStudioSession:
         """
 
         return self.call(lambda: _calculate_merit(self._system.MFE))
+
+    def run_local_optimization(
+        self,
+        algorithm: str = 'DampedLeastSquares',
+        cycles: str = 'Automatic',
+    ) -> dict[str, object]:
+        """
+        Run local optimization on the lens open in the OpticStudio window.
+
+        The call waits until the run finishes. The core count stays at the value already set in the Optimize dialog.
+
+        :param str algorithm: ``DampedLeastSquares`` or ``OrthogonalDescent``.
+        :param str cycles: ``Automatic``, ``Fixed_1_Cycle``, ``Fixed_5_Cycles``, ``Fixed_10_Cycles``, or ``Fixed_50_Cycles``.
+        :returns: The algorithm, cycle count, number of variables and targets, and the merit function before and after the run. A merit value is ``None`` when OpticStudio does not return a finite number.
+        :rtype: dict[str, object]
+        :raises ValueError: The algorithm or cycles cannot be used, the lens has no variable or no target, or the run does not finish.
+        :raises OpticStudioError: The session is already closed, or OpticStudio cannot answer.
+        """
+
+        return self.call(lambda: _run_local_optimization(self._system, algorithm, cycles))
 
     def single_ray_trace(
         self,
