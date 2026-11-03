@@ -10,6 +10,7 @@ directory.
 import collections.abc
 import ctypes
 import dataclasses
+import math
 import os
 import queue
 import threading
@@ -279,6 +280,19 @@ class OpticStudioSession:
             return MERIT.read(editor)
 
         return self.call(change)
+
+    def first_order(self) -> dict[str, float | str | None]:
+        """
+        Return first-order values for the lens open in the OpticStudio window.
+
+        The system is updated first. Lengths are in lens units. ``working_f_number`` is the on-axis value at the primary wavelength. ``total_length`` runs from surface 1 to the image surface.
+
+        :returns: Effective focal length, entrance pupil diameter, paraxial and working F-numbers, and total length. A number is ``None`` when OpticStudio does not return a finite value. ``status`` is empty when the update reports nothing.
+        :rtype: dict[str, float | str | None]
+        :raises OpticStudioError: The session is already closed, or OpticStudio cannot answer.
+        """
+
+        return self.call(lambda: _read_first_order(self._system))
 
     def call(self, function):
         """
@@ -1890,6 +1904,37 @@ MERIT = MeritFunction(
         Attribute('contribution', 'Contribution', float, writable=False),
     ),
 )
+
+
+# Name, operand, and the two integer arguments. Wave 0 selects the primary wavelength.
+# TOTR starts at surface 1; a second integer of 0 ends at the image surface.
+_FIRST_ORDER: tuple[tuple[str, str, int, int], ...] = (
+    ('effective_focal_length', 'EFFL', 0, 0),
+    ('entrance_pupil_diameter', 'EPDI', 0, 0),
+    ('image_space_f_number', 'ISFN', 0, 0),
+    ('working_f_number', 'WFNO', 0, 0),
+    ('total_length', 'TOTR', 1, 0),
+)
+
+
+def _read_first_order(system) -> dict[str, float | str | None]:
+    # Update first so the operands see the latest solves.
+    status = text(system.UpdateStatus())
+    editor = system.MFE
+
+    import ZOSAPI
+
+    operand = ZOSAPI.Editors.MFE.MeritOperandType
+    values: dict[str, float | str | None] = {}
+
+    for name, kind, surf, wave in _FIRST_ORDER:
+        raw = editor.GetOperandValue(getattr(operand, kind), surf, wave, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+        number = float(raw)
+        values[name] = number if math.isfinite(number) else None
+
+    values['status'] = status
+
+    return values
 
 
 def _initialize_sta():
