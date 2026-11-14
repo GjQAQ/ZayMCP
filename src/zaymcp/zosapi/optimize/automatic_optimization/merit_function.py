@@ -15,6 +15,14 @@ __all__ = [
 # Operand data columns from Param1 upward. None until the first read on the ZOS-API thread.
 _MERIT_COLUMNS: dict[str, object] | None = None
 
+# Merit columns that are present only when the operand type uses them. Contrib is the API name of contribution.
+_VALUE_COLUMNS: dict[str, str] = {
+    'target': 'Target',
+    'weight': 'Weight',
+    'value': 'Value',
+    'contribution': 'Contrib',
+}
+
 
 def _merit_columns() -> dict[str, object]:
     # Resolved on the ZOS-API thread, where the enumeration is already loaded.
@@ -83,6 +91,15 @@ def _operand_comment_cell(row):
     return row.GetOperandCell(ZOSAPI.Editors.MFE.MeritColumn.Comment)
 
 
+def _value_column_used(row, name: str) -> bool:
+    # Target, weight, value, and contribution exist only for operand types that use them.
+    import ZOSAPI
+
+    column = getattr(ZOSAPI.Editors.MFE.MeritColumn, _VALUE_COLUMNS[name])
+
+    return bool(row.GetOperandCell(column).IsActive)
+
+
 @dataclasses.dataclass(frozen=True)
 class MeritFunction:
     """
@@ -103,7 +120,7 @@ class MeritFunction:
 
         :param editor: The ZOS-API merit function editor.
         :param int | None operand: One 1-based operand number. ``None`` reads every operand.
-        :returns: ``operands``, or the one requested operand. Each operand includes ``parameters`` for the columns its type uses.
+        :returns: ``operands``, or the one requested operand. Each operand includes ``parameters`` for the columns its type uses. ``target``, ``weight``, ``value``, and ``contribution`` are omitted when the operand does not use them.
         :rtype: dict[str, object]
         :raises ValueError: ``operand`` is outside the editor.
         """
@@ -290,6 +307,9 @@ class MeritFunction:
         comment_cell = None if comment is None else self._comment_for_write(row, comment)
 
         for attribute, value in columns:
+            if attribute.name in _VALUE_COLUMNS and not _value_column_used(row, attribute.name):
+                raise ValueError(f'{attribute.name} is not used by this operand.')
+
             attribute._place(row, value)
 
         for cell, value in converted:
@@ -343,6 +363,9 @@ class MeritFunction:
         ordered = {}
 
         for key, value in record.items():
+            if key in _VALUE_COLUMNS and not _value_column_used(row, key):
+                continue
+
             ordered[key] = value
 
             if key == 'type':

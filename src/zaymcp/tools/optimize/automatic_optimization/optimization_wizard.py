@@ -139,7 +139,9 @@ if list(OptimizationWizardSettings.__annotations__) != _wizard_setting_names:
         'Apply the Optimization Wizard and return the operands it creates. '
         'Omit `values` to use the wizard defaults. '
         'Each property of `values` is one wizard control. '
-        'Operands from the Start At row through the end of the editor are replaced.'
+        'Operands from the Start At row through the end of the editor are replaced. '
+        'Glass boundaries, air boundaries, favorite operands, manufacturing yield, and maximum distortion stay off unless `values` sets them. '
+        'Returned `value` and `contribution` are not calculated.'
     ),
 )
 def apply_optimization_wizard(

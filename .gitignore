@@ -13,3 +13,8 @@ wheels/
 .cadence
 .cursor
 .idea
+
+# Lens files produced by examples
+examples/*.zda
+examples/*.zmx
+examples/*.zos

@@ -94,6 +94,9 @@ def read(ctx, load):
     except zaymcp.zosapi.session.OpticStudioError as exc:
         connection.close()
         raise mcp.server.mcpserver.exceptions.ToolError(str(exc)) from exc
+    except ValueError as exc:
+        # ValueError is an anticipated tool failure. Left as ValueError, the host only sees "Error executing tool".
+        raise mcp.server.mcpserver.exceptions.ToolError(str(exc)) from exc
 
 @server.tool(
     description='Return version, license, and connection details for the OpticStudio window.',

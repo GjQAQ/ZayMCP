@@ -13,7 +13,11 @@ __all__ = [
 ]
 
 @mcp_server.server.tool(
-    description='Return the Merit Function Editor operands, or one operand when `operand` is given.',
+    description=(
+        'Return the Merit Function Editor operands, or one operand when `operand` is given. '
+        '`value` and `contribution` stay at the last calculation, and they are 0 until `calculate_merit_function` runs. '
+        '`target`, `weight`, `value`, and `contribution` are omitted when the operand does not use that column.'
+    ),
 )
 def get_merit_function(
     ctx: mcp.server.mcpserver.Context,
@@ -35,10 +39,10 @@ def get_merit_function(
         * **parameters[].column** -- Column name, such as ``Param1``.
         * **parameters[].header** -- Column title from the Merit Function Editor. This member is read-only.
         * **parameters[].value** -- Cell value. A number, or a string when the cell stores text.
-        * **target** -- Target value.
-        * **weight** -- Operand weight.
-        * **value** -- Operand value currently shown in the editor. This member is read-only.
-        * **contribution** -- Contribution of this operand to the merit function, as currently shown. This member is read-only.
+        * **target** -- Target value. Omitted when the operand does not use it.
+        * **weight** -- Operand weight. Omitted when the operand does not use it.
+        * **value** -- Operand value from the last calculation. 0 until :meth:`calculate_merit_function` runs. This member is read-only. Omitted when the operand does not use it.
+        * **contribution** -- Contribution from the last calculation. 0 until :meth:`calculate_merit_function` runs. This member is read-only. Omitted when the operand does not use it.
         * **comment** -- Operand comment. Empty when the operand has no comment.
     :rtype: dict[str, object]
     :raises ValueError: ``operand`` is outside the editor.
@@ -56,7 +60,9 @@ def get_merit_function(
         '`values` uses the same fields as one operand returned by `get_merit_function`. '
         '`type` sets the operand type. '
         '`parameters` maps column names such as `Param1` to new values. '
-        'When both are set, the type changes first.'
+        '`target` and `weight` are rejected when the operand does not use them. '
+        'When both are set, the type changes first. '
+        'The returned `value` and `contribution` are not recalculated.'
     ),
 )
 def set_merit_rows(
@@ -70,7 +76,7 @@ def set_merit_rows(
 
     :param action: ``change``, ``add``, or ``remove``.
     :param number: Operand number. The first operand is 1. ``add`` inserts at this number, and following operands move up. The inserted operand keeps the editor default until ``values`` sets ``type``. Pass ``number`` one past the last operand to append.
-    :param values: Keys to write. The fields are the same as those of one operand returned by :meth:`get_merit_function`. Omit ``values`` to insert a default operand or to remove an operand. ``number``, ``active``, ``value``, and ``contribution`` are read-only. ``type`` is an operand type name, such as ``EFFL``. ``parameters`` maps column names such as ``Param1`` to a number or a string; only listed columns are written, and ``header`` is read-only. ``type`` is applied before ``parameters``.
+    :param values: Keys to write. The fields are the same as those of one operand returned by :meth:`get_merit_function`. Omit ``values`` to insert a default operand or to remove an operand. ``number``, ``active``, ``value``, and ``contribution`` are read-only. ``type`` is an operand type name, such as ``EFFL``. ``parameters`` maps column names such as ``Param1`` to a number or a string; only listed columns are written, and ``header`` is read-only. ``type`` is applied before ``parameters``. ``target`` and ``weight`` are rejected when the operand does not use them.
     :returns: The operands after the change.
     :rtype: dict[str, object]
     :raises ValueError: The action, number, or values cannot be applied.

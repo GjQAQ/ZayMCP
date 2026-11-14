@@ -209,7 +209,7 @@ class OpticStudioSession:
         Return Lens Data Editor surfaces for the lens open in the OpticStudio window.
 
         :param int | None surface: One surface number. ``None`` reads every surface. 0 is the object surface.
-        :returns: Every surface, or the one requested surface. Each surface includes the parameter columns its type uses.
+        :returns: Every surface, or the one requested surface. Each surface includes the parameter columns its type uses. The image surface omits ``thickness`` and ``thickness_solve``. ``tce`` and ``tce_solve`` are omitted when the surface does not use the TCE column.
         :rtype: dict[str, object]
         :raises ValueError: ``surface`` is outside the editor.
         :raises OpticStudioError: The session is already closed, or OpticStudio cannot answer.
@@ -230,7 +230,7 @@ class OpticStudioSession:
 
         :param str action: ``change``, ``add``, or ``remove``.
         :param int | None number: Surface number. 0 is the object surface.
-        :param dict[str, object] | None values: Keys to write. The fields are the same as those of one surface returned by :meth:`lens_data`. ``type`` changes the surface type first. ``parameters`` maps column names such as ``Par1`` to a value or to ``value`` and ``solve``. ``radius_solve`` and the other cell solves set that cell's solve.
+        :param dict[str, object] | None values: Keys to write. The fields are the same as those of one surface returned by :meth:`lens_data`. ``radius`` and ``thickness`` accept ``Infinity`` for an infinite length. A radius of 0 is returned as ``Infinity``. A thickness of 0 is zero. ``thickness`` and ``thickness_solve`` are rejected on the image surface. ``tce`` and ``tce_solve`` are rejected when the surface does not use the TCE column. ``type`` changes the surface type first. ``parameters`` maps column names such as ``Par1`` to a value or to ``value`` and ``solve``. ``radius_solve`` and the other cell solves set that cell's solve.
         :returns: The surfaces after the change.
         :rtype: dict[str, object]
         :raises ValueError: The action, number, or values cannot be applied.
@@ -250,7 +250,7 @@ class OpticStudioSession:
         Return Merit Function Editor operands for the lens open in the OpticStudio window.
 
         :param int | None operand: One 1-based operand number. ``None`` reads every operand.
-        :returns: Every operand, or the one requested operand. Each operand includes the parameter columns its type uses.
+        :returns: Every operand, or the one requested operand. Each operand includes the parameter columns its type uses. ``target``, ``weight``, ``value``, and ``contribution`` are omitted when the operand does not use them.
         :rtype: dict[str, object]
         :raises ValueError: ``operand`` is outside the editor.
         :raises OpticStudioError: The session is already closed, or OpticStudio cannot answer.
@@ -271,7 +271,7 @@ class OpticStudioSession:
 
         :param str action: ``change``, ``add``, or ``remove``.
         :param int | None number: 1-based operand number.
-        :param dict[str, object] | None values: Keys to write. The fields are the same as those of one operand returned by :meth:`merit_function`. ``type`` changes the operand type first. ``parameters`` maps column names such as ``Param1`` to new values.
+        :param dict[str, object] | None values: Keys to write. The fields are the same as those of one operand returned by :meth:`merit_function`. ``type`` changes the operand type first. ``parameters`` maps column names such as ``Param1`` to new values. ``target`` and ``weight`` are rejected when the operand does not use them.
         :returns: The operands after the change.
         :rtype: dict[str, object]
         :raises ValueError: The action, number, or values cannot be applied.

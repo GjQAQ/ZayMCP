@@ -1,8 +1,10 @@
 """System Explorer tools."""
 
+import json
 import typing
 
 import mcp.server.mcpserver
+import mcp.types
 
 import zaymcp.server as mcp_server
 
@@ -12,8 +14,20 @@ __all__ = [
     'set_system_rows',
 ]
 
+
+def _row_list(rows: list[dict[str, object]]) -> mcp.types.CallToolResult:
+    # A returned list becomes one content block per row, so one row arrives as an object.
+    return mcp.types.CallToolResult(
+        content=[mcp.types.TextContent(type='text', text=json.dumps(rows, indent=2))],
+        structured_content={'result': rows},
+    )
+
+
 @mcp_server.server.tool(
-    description='Return one group of settings from System Explorer.',
+    description=(
+        'Return one group of settings from System Explorer. '
+        'The wavelengths group is a list of rows, including when it contains one wavelength.'
+    ),
 )
 def get_system_settings(
     ctx: mcp.server.mcpserver.Context,
@@ -31,7 +45,7 @@ def get_system_settings(
     Return one group of System Explorer settings.
 
     :param section: ``units``, ``aperture``, ``fields``, ``wavelengths``, ``environment``, ``polarization``, or ``ray_aiming``.
-    :returns: The selected group. ``wavelengths`` is a list of wavelengths in micrometers. The other groups are dictionaries.
+    :returns: The selected group. ``wavelengths`` is a list of wavelengths in micrometers, including when there is one wavelength. The other groups are dictionaries.
 
         **units**
 
@@ -125,7 +139,12 @@ def get_system_settings(
     :raises ValueError: ``section`` is not a setting group.
     """
 
-    return mcp_server.read(ctx, lambda session: session.system_data(section))
+    settings = mcp_server.read(ctx, lambda session: session.system_data(section))
+
+    if isinstance(settings, list):
+        return _row_list(settings)
+
+    return settings
 
 
 @mcp_server.server.tool(
@@ -167,8 +186,10 @@ def set_system_settings(
         'Change one field point or wavelength in System Explorer. '
         '`action` is `change`, `add`, `remove`, or `make_primary`. '
         '`number` is the 1-based row. `add` appends a row and does not use `number`. '
-        '`values` uses the same fields as one row returned by `get_system_settings`. '
-        '`make_primary` selects the primary wavelength.'
+        '`values` uses the writable fields of one row returned by `get_system_settings`. '
+        '`number`, `active`, `primary`, `x_solve`, and `y_solve` are read-only and must be omitted. '
+        '`make_primary` selects the primary wavelength. '
+        'Returns the rows as a list, including when there is one row.'
     ),
 )
 def set_system_rows(
@@ -184,7 +205,7 @@ def set_system_rows(
     :param section: ``fields`` or ``wavelengths``.
     :param action: ``change``, ``add``, ``remove``, or ``make_primary``.
     :param number: 1-based row. Required for ``change``, ``remove``, and ``make_primary``. ``add`` appends a row.
-    :param values: Keys to write. The fields are the same as those of one row returned by :meth:`get_system_settings`. Omit ``values`` for ``remove`` and ``make_primary``.
+    :param values: Keys to write. The writable fields are the same as those of one row returned by :meth:`get_system_settings`. Omit read-only fields, including ``primary``. Omit ``values`` for ``remove`` and ``make_primary``.
 
         **fields**
 
@@ -212,9 +233,9 @@ def set_system_rows(
         * **weight** -- Relative wavelength weight.
 
         ``number``, ``active``, and ``primary`` are read-only. ``make_primary`` selects the primary wavelength.
-    :returns: The rows after the change. For ``fields``, these are the field points.
+    :returns: The rows after the change, including when there is one row. For ``fields``, these are the field points.
     :rtype: list[dict[str, object]]
     :raises ValueError: ``section`` has no row list, or the action, number, or values cannot be applied.
     """
 
-    return mcp_server.read(ctx, lambda session: session.set_system_rows(section, action, number, values))
+    return _row_list(mcp_server.read(ctx, lambda session: session.set_system_rows(section, action, number, values)))

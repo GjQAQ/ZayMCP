@@ -189,6 +189,20 @@ def _solve_request(value: object) -> dict[str, object]:
     return prepared
 
 
+def _replay_solve(value: object) -> dict[str, object] | None:
+    # A captured solve is written back only when the caller could write that type.
+    # Automatic and None stay on the cell.
+    if not isinstance(value, dict):
+        return None
+
+    kind = value.get('type')
+
+    if not isinstance(kind, str) or kind not in _SOLVE_FIELDS:
+        return None
+
+    return _solve_request(value)
+
+
 def _solve_field_value(field: _SolveField, value: object) -> object:
     if field.kind == 'column':
         if not isinstance(value, str):

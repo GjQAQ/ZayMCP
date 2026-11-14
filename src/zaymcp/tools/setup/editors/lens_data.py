@@ -17,7 +17,11 @@ _CellValue = str | float | int | dict[str, _SolveValue]
 _EditorValues = dict[str, str | float | bool | int | dict[str, _CellValue]]
 
 @mcp_server.server.tool(
-    description='Return the Lens Data Editor surfaces, or one surface when `surface` is given.',
+    description=(
+        'Return the Lens Data Editor surfaces, or one surface when `surface` is given. '
+        '`radius` and `thickness` are `"Infinity"` when that length is infinite. '
+        'The image surface omits `thickness` and `thickness_solve`.'
+    ),
 )
 def get_lens_data(
     ctx: mcp.server.mcpserver.Context,
@@ -41,7 +45,7 @@ def get_lens_data(
         * **parameters[].value** -- Cell value. A number, or a string when the cell stores text.
         * **parameters[].solve** -- Solve on that parameter cell. The same object as ``radius_solve``.
         * **comment** -- Surface comment. Empty when the surface has no comment.
-        * **radius** -- Radius of curvature, in lens units.
+        * **radius** -- Radius of curvature, in lens units. ``Infinity`` when the radius is infinite. A radius of 0 is returned as ``Infinity``.
         * **radius_solve** -- Solve on the radius cell. ``thickness_solve``, ``material_solve``, ``coating_solve``, ``semi_diameter_solve``, ``chip_zone_solve``, ``mechanical_semi_diameter_solve``, ``conic_solve``, and ``tce_solve`` use the same object.
         * **radius_solve.type** -- ``Variable``, ``Fixed``, ``SurfacePickup``, ``FNumber``, ``Position``, ``ConfigPickup``, or ``ThermalPickup``. A type this cell does not support is rejected.
         * **radius_solve.f_number** -- F-number. Present when ``type`` is ``FNumber``.
@@ -53,14 +57,14 @@ def get_lens_data(
         * **radius_solve.column** -- Lens Data column a surface pickup reads, such as ``Thickness`` or ``Par1``. Omitted when the pickup uses the same column.
         * **radius_solve.operand** -- Operand a configuration pickup reads. Present when ``type`` is ``ConfigPickup``.
         * **radius_solve.configuration** -- Configuration a pickup reads. Present for ``ConfigPickup`` and ``ThermalPickup``.
-        * **thickness** -- Thickness to the next surface, in lens units.
+        * **thickness** -- Thickness to the next surface, in lens units. ``Infinity`` when the thickness is infinite. A thickness of 0 is zero. Omitted on the image surface, along with ``thickness_solve``.
         * **material** -- Glass name. Empty when the surface is air.
         * **coating** -- Coating name. Empty when the surface has no coating.
         * **semi_diameter** -- Clear semi-diameter, in lens units.
         * **chip_zone** -- Chip zone, in lens units.
         * **mechanical_semi_diameter** -- Mechanical semi-diameter, in lens units.
         * **conic** -- Conic constant.
-        * **tce** -- Thermal coefficient of expansion stored for the surface.
+        * **tce** -- Thermal coefficient of expansion stored for the surface, in 1e-6/K. Omitted, along with ``tce_solve``, when the surface does not use the TCE column. A catalog glass takes thermal expansion from the glass catalog.
     :rtype: dict[str, object]
     :raises ValueError: ``surface`` is outside the editor.
     """
@@ -92,7 +96,7 @@ def set_lens_rows(
 
     :param action: ``change``, ``add``, or ``remove``.
     :param number: Surface number. 0 is the object surface. ``add`` inserts at this number, and following surfaces move up. The inserted surface is ``Standard`` until ``values`` sets ``type``.
-    :param values: Keys to write. The fields are the same as those of one surface returned by :meth:`get_lens_data`. Omit ``values`` to insert a default surface or to remove a surface. ``surface_number`` is read-only. ``type`` is a surface type name, such as ``EvenAspheric``. ``parameters`` maps column names such as ``Par1`` to a number, a string, or an object with ``value`` and ``solve``. ``header`` is read-only. ``type`` is applied before ``parameters``. ``radius_solve`` and the other cell solves set that cell's solve; ``Fixed`` clears it. Omit ``column`` on a surface pickup to use the same column. Setting ``is_stop`` to true makes that surface the stop. The object and image surfaces cannot be removed.
+    :param values: Keys to write. The fields are the same as those of one surface returned by :meth:`get_lens_data`. Omit ``values`` to insert a default surface or to remove a surface. ``surface_number`` is read-only. ``radius`` and ``thickness`` accept ``Infinity`` for an infinite length. A radius of 0 is returned as ``Infinity``. A thickness of 0 is zero. ``thickness`` and ``thickness_solve`` are rejected on the image surface. ``tce`` and ``tce_solve`` are rejected when the surface does not use the TCE column. ``type`` is a surface type name, such as ``EvenAspheric``. ``parameters`` maps column names such as ``Par1`` to a number, a string, or an object with ``value`` and ``solve``. ``header`` is read-only. ``type`` is applied before ``parameters``. ``radius_solve`` and the other cell solves set that cell's solve; ``Fixed`` clears it. Omit ``column`` on a surface pickup to use the same column. Setting ``is_stop`` to true makes that surface the stop. The object and image surfaces cannot be removed.
     :returns: The surfaces after the change.
     :rtype: dict[str, object]
     :raises ValueError: The action, number, or values cannot be applied.

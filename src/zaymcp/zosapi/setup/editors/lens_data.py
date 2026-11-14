@@ -1,6 +1,7 @@
 """Lens Data Editor columns and row edits."""
 
 import dataclasses
+import math
 
 from zaymcp.zosapi.model.cells import (
     _UNSET,
@@ -10,6 +11,7 @@ from zaymcp.zosapi.model.cells import (
     _cell_write,
     _place_cell,
     _read_solve,
+    _replay_solve,
     _solve_request,
 )
 from zaymcp.zosapi.model.fields import Attribute, text
@@ -21,6 +23,36 @@ __all__ = [
 
 # Parameter columns from Par0 upward. None until the first read on the ZOS-API thread.
 _PARAMETER_COLUMNS: dict[str, object] | None = None
+
+#: Text used for an infinite radius or thickness.
+_INFINITY: str = 'Infinity'
+
+#: Lens Data columns that accept ``Infinity``.
+_INFINITE_LENGTHS: frozenset[str] = frozenset(('radius', 'thickness'))
+
+
+def _length_value(value: object) -> float | str:
+    # OpticStudio returns a non-finite double for an infinite radius or thickness.
+    number = float(value)
+
+    if not math.isfinite(number):
+        return _INFINITY
+
+    return number
+
+
+def _surface_length(name: str, value: object) -> float:
+    # A radius of 0 is infinite. A thickness of 0 is a real zero.
+    if value == _INFINITY:
+        if name == 'radius':
+            return 0.0
+
+        return math.inf
+
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(f'{name} must be a number or "{_INFINITY}".')
+
+    return float(value)
 
 
 def _parameter_columns() -> dict[str, object]:
@@ -94,6 +126,14 @@ def _active_cells(row) -> dict[str, object]:
     return active
 
 
+def _tce_used(row) -> bool:
+    # The column exists on every surface, so IsActive stays true.
+    # A catalog glass grays the cell out and IsReadOnly becomes true. The cell then displays "-".
+    cell = row.TCECell
+
+    return bool(cell.IsActive) and not bool(cell.IsReadOnly)
+
+
 _LENS_SOLVE_COLUMNS: dict[str, str] = {
     'radius': 'RadiusCell',
     'thickness': 'ThicknessCell',
@@ -127,7 +167,7 @@ class LensData:
 
         :param editor: The ZOS-API lens data editor.
         :param int | None surface: One surface number. ``None`` reads every surface. 0 is the object surface.
-        :returns: ``surfaces``, or the one requested surface. Each surface includes ``parameters`` for the columns its type uses.
+        :returns: ``surfaces``, or the one requested surface. Each surface includes ``parameters`` for the columns its type uses. The image surface omits ``thickness`` and ``thickness_solve``. ``tce`` and ``tce_solve`` are omitted when the surface does not use the TCE column.
         :rtype: dict[str, object]
         :raises ValueError: ``surface`` is outside the editor.
         """
@@ -193,17 +233,115 @@ class LensData:
         index = self._surface_number(editor, number, inserting=False)
         row = editor.GetSurfaceAt(index)
 
+        if bool(row.IsImage) and 'thickness' in solves:
+            raise ValueError('The image surface has no thickness.')
+
         self._apply(row, surface_type, parameters, solves, columns)
 
     def _add(self, editor, number: int | None, values: dict[str, object]) -> None:
         surface_type, parameters, solves, columns = self._prepare(values)
         index = self._surface_number(editor, number, inserting=True)
+        # InsertNewSurfaceAt copies the surface that moves down, including the image radius of curvature.
+        kept = [self._capture(editor.GetSurfaceAt(i)) for i in range(int(editor.NumberOfSurfaces))]
         row = editor.InsertNewSurfaceAt(index)
 
         if row is None:
             raise ValueError(f'Surface {index} could not be inserted.')
 
+        self._blank(row)
+
+        for old_index, captured in enumerate(kept):
+            new_index = old_index if old_index < index else old_index + 1
+            self._restore(editor.GetSurfaceAt(new_index), captured)
+
         self._apply(row, surface_type, parameters, solves, columns)
+
+    def _capture(self, row) -> dict[str, object]:
+        solves = {}
+        owned = set()
+
+        for name, cell_name in _LENS_SOLVE_COLUMNS.items():
+            if name == 'tce' and not _tce_used(row):
+                continue
+
+            read = _read_solve(getattr(row, cell_name))
+            request = _replay_solve(read)
+
+            if request is None:
+                # None is an empty solve. The cell value is still stored on the surface.
+                if read.get('type') != 'None':
+                    owned.add(name)
+
+                continue
+
+            solves[name] = request
+
+        columns = []
+
+        for attribute in self.attributes:
+            if not attribute.writable or attribute.name in owned:
+                continue
+
+            if attribute.name == 'thickness' and bool(row.IsImage):
+                continue
+
+            if attribute.name == 'tce' and not _tce_used(row):
+                continue
+
+            value = attribute.read(row)
+
+            if attribute.name == 'is_stop' and not value:
+                continue
+
+            if attribute.name in _INFINITE_LENGTHS:
+                value = _surface_length(attribute.name, value)
+
+            columns.append((attribute, value))
+
+        parameters = {}
+
+        for item in self._parameters(row):
+            read = item['solve']
+            request = _replay_solve(read)
+
+            if request is None and read.get('type') != 'None':
+                continue
+
+            parameters[str(item['column'])] = (item['value'], request)
+
+        return {
+            'type': str(row.Type),
+            'parameters': parameters or None,
+            'solves': solves,
+            'columns': columns,
+        }
+
+    def _restore(self, row, captured: dict[str, object]) -> None:
+        if str(row.Type) != captured['type']:
+            self._change_type(row, str(captured['type']))
+
+        self._apply(row, None, captured['parameters'], captured['solves'], captured['columns'])
+
+    def _blank(self, row) -> None:
+        # The inserted surface is a new Standard surface. Its radius is infinite and its thickness is zero.
+        by_name = {item.name: item for item in self.attributes}
+        columns = [
+            (by_name['comment'], ''),
+            (by_name['radius'], 0.0),
+            (by_name['thickness'], 0.0),
+            (by_name['material'], ''),
+            (by_name['coating'], ''),
+            (by_name['conic'], 0.0),
+            (by_name['tce'], 0.0),
+        ]
+        # Coating has no solve. Semi-diameter, chip zone, and mechanical semi-diameter stay automatic.
+        solves = {
+            name: {'type': 'Fixed'}
+            for name in ('radius', 'thickness', 'material', 'conic', 'tce')
+        }
+
+        self._change_type(row, 'Standard')
+        self._apply(row, None, None, solves, columns)
 
     def _remove(self, editor, number: int | None, values: dict[str, object]) -> None:
         if values:
@@ -240,6 +378,20 @@ class LensData:
         prepared = []
 
         for key, value in values.items():
+            if value is None:
+                raise ValueError(f'{key} cannot be null.')
+
+            if key in _INFINITE_LENGTHS:
+                attribute = by_name.get(key)
+
+                if attribute is None:
+                    allowed = self._writable_names()
+                    raise ValueError(f'Unknown setting {key!r}. Expected one of: {allowed}.')
+
+                prepared.append((attribute, _surface_length(key, value)))
+
+                continue
+
             if key == 'type':
                 surface_type = _surface_type_name(value)
 
@@ -302,13 +454,25 @@ class LensData:
         solves: dict[str, dict[str, object]],
         columns: list[tuple[Attribute, object]],
     ) -> None:
+        # The image surface has no following surface, and OpticStudio ignores a thickness written there.
+        if any(attribute.name == 'thickness' for attribute, _value in columns) and bool(row.IsImage):
+            raise ValueError('The image surface has no thickness.')
+
         # The surface type selects which parameter columns exist, so it changes before those columns are checked.
         if surface_type is not None:
             self._change_type(row, surface_type)
 
         converted = [] if parameters is None else self._converted_parameters(row, parameters)
+        tce_columns = []
+        other_columns = []
 
         for attribute, value in columns:
+            if attribute.name == 'tce':
+                tce_columns.append((attribute, value))
+            else:
+                other_columns.append((attribute, value))
+
+        for attribute, value in other_columns:
             attribute._place(row, value)
 
         for cell, value, solve in converted:
@@ -317,6 +481,13 @@ class LensData:
 
             if solve is not None:
                 _apply_solve(cell, solve)
+
+        # Material is written first. A catalog glass then turns the TCE column off.
+        if (tce_columns or 'tce' in solves) and not _tce_used(row):
+            raise ValueError('tce is not used by this surface.')
+
+        for attribute, value in tce_columns:
+            attribute._place(row, value)
 
         for name, request in solves.items():
             _apply_solve(getattr(row, _LENS_SOLVE_COLUMNS[name]), request)
@@ -358,11 +529,20 @@ class LensData:
         return converted
 
     def _surface(self, row) -> dict[str, object]:
-        record = Attribute.record(row, self.attributes)
+        # The image surface has no following surface, so it has no thickness column.
+        attributes = self.attributes
+
+        if bool(row.IsImage):
+            attributes = tuple(item for item in attributes if item.name != 'thickness')
+
+        record = Attribute.record(row, attributes)
         parameters = self._parameters(row)
         ordered = {}
 
         for key, value in record.items():
+            if key == 'tce' and not _tce_used(row):
+                continue
+
             ordered[key] = value
 
             if key in _LENS_SOLVE_COLUMNS:
@@ -412,8 +592,8 @@ LENS = LensData(
         # Written by _change_type through ChangeType.
         Attribute('type', 'Type', str, writable=False),
         Attribute('comment', 'Comment', text),
-        Attribute('radius', 'Radius', float),
-        Attribute('thickness', 'Thickness', float),
+        Attribute('radius', 'Radius', _length_value),
+        Attribute('thickness', 'Thickness', _length_value),
         Attribute('material', 'Material', text),
         Attribute('coating', 'Coating', text),
         Attribute('semi_diameter', 'SemiDiameter', float),
