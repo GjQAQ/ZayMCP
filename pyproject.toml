@@ -22,3 +22,9 @@ where = ["src"]
 [tool.uv]
 default-groups = "all"
 package = true
+
+[dependency-groups]
+docs = [
+    "furo>=2025.12.19",
+    "sphinx>=9.1.1",
+]
