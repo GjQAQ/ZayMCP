@@ -1,0 +1,20 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
+# IDE-specific
+.cadence
+.cursor
+.idea
+
+# Lens files produced by examples
+examples/*.zda
+examples/*.zmx
+examples/*.zos
