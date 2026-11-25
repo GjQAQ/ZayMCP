@@ -17,14 +17,6 @@ An MCP server for Ansys Zemax OpticStudio 2024 R2.
 
 ## Quick start
 
-### Install
-
-The package uses the Windows registry and runs only on Windows.
-
-```bash
-uv tool install zaymcp
-```
-
 ### Configure the MCP server
 
 Register the server with the host. `OPTICSTUDIO_DIRECTORY` is the directory that contains `OpticStudio.exe`. The server uses it when Zemax's helper cannot find the installation.
