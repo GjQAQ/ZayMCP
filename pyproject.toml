@@ -8,10 +8,29 @@ version = "0.1.0"
 description = "An MCP server for Ansys Zemax OpticStudio."
 readme = "README.md"
 requires-python = ">=3.12"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [
+    { name = "Jiaqi Guo" },
+]
+keywords = ["mcp", "opticstudio", "zemax"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Operating System :: Microsoft :: Windows",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3 :: Only",
+]
 dependencies = [
     "mcp>=2.3.0",
     "pythonnet>=3.2.1",
 ]
+
+[project.urls]
+Homepage = "https://github.com/GjQAQ/ZayMCP"
+Documentation = "https://gjqaq.github.io/ZayMCP/"
+Repository = "https://github.com/GjQAQ/ZayMCP"
+Issues = "https://github.com/GjQAQ/ZayMCP/issues"
 
 [project.scripts]
 zaymcp = "zaymcp.server:main"

@@ -17,29 +17,24 @@ An MCP server for Ansys Zemax OpticStudio 2024 R2.
 
 ## Quick start
 
-### Configure the MCP server
+### Install
 
-Clone the repository and create the environment:
+The package uses the Windows registry and runs only on Windows.
 
 ```bash
-git clone https://github.com/GjQAQ/ZayMCP.git
-cd ZayMCP
-uv sync
+uv tool install zaymcp
 ```
 
-Register the server with the host. `--project` is the checkout. `OPTICSTUDIO_DIRECTORY` is the directory that contains `OpticStudio.exe`. The server uses it when Zemax's helper cannot find the installation.
+### Configure the MCP server
+
+Register the server with the host. `OPTICSTUDIO_DIRECTORY` is the directory that contains `OpticStudio.exe`. The server uses it when Zemax's helper cannot find the installation.
 
 ```json
 {
   "mcpServers": {
     "zaymcp": {
-      "command": "uv",
-      "args": [
-        "run",
-        "--project",
-        "<path-to-checkout>",
-        "zaymcp"
-      ],
+      "command": "uvx",
+      "args": ["zaymcp"],
       "env": {
         "OPTICSTUDIO_DIRECTORY": "<path-to-OpticStudio>"
       }
@@ -126,12 +121,37 @@ When OpticStudio cannot answer a call, the server closes the connection. The nex
 
 ## Development
 
+Clone the repository and create the environment:
+
 ```bash
+git clone https://github.com/GjQAQ/ZayMCP.git
+cd ZayMCP
 uv sync
+```
+
+To run this checkout instead of the published package, point the host at it:
+
+```json
+{
+  "mcpServers": {
+    "zaymcp-dev": {
+      "command": "uv",
+      "args": [
+        "run",
+        "--project",
+        "<path-to-checkout>",
+        "zaymcp"
+      ],
+      "env": {
+        "OPTICSTUDIO_DIRECTORY": "<path-to-OpticStudio>"
+      }
+    }
+  }
+}
 ```
 
 Development conventions are in [CONTRIBUTING.md](CONTRIBUTING.md). Lasting decisions are recorded in [docs/adr](docs/adr).
 
 ## License
 
-[MIT](LICENSE) © 2026 GjQAQ
+[MIT](LICENSE) © 2026 Jiaqi Guo
